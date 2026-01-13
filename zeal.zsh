@@ -150,6 +150,7 @@ _load_contextual_history_async() {
 # Hook to capture commands with directory context
 zshaddhistory() {
   local command="${1%%$'\n'}"
+  local reject_command=false
 
   # Skip if empty or starts with space (HIST_IGNORE_SPACE)
   [[ -z "$command" || "$command" == " "* ]] && return 0
@@ -181,6 +182,7 @@ zshaddhistory() {
     # This prevents "command not found" entries from being stored
     if ! (whence -w "$first_word" &>/dev/null); then
       store_contextual=false
+      reject_command=true
     fi
 
     # Special validation for cd command - check if target directory exists
@@ -199,11 +201,13 @@ zshaddhistory() {
         local expanded="${HOME}/${cd_target#~/}"
         if [[ ! -d "$expanded" ]]; then
           store_contextual=false
+          reject_command=true
         fi
       else
         # Check if directory exists (relative or absolute path)
         if [[ ! -d "$cd_target" ]]; then
           store_contextual=false
+          reject_command=true
         fi
       fi
     fi
@@ -237,8 +241,8 @@ zshaddhistory() {
     fi
   fi
 
-  # Return 0 to also add to normal history
-  return 0
+  # Return 1 to reject from global history if command failed validation
+  [[ "$reject_command" == "true" ]] && return 1 || return 0
 }
 
 # Fast contextual search for auto-suggestions
