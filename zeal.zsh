@@ -706,26 +706,6 @@ _menu_move_selection() {
   _menu_update_display
 }
 
-# Accept the selected command
-_menu_accept_selection() {
-  # Get the selected command from the appropriate array (contextual or global)
-  local selected_cmd=""
-  if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
-    selected_cmd="${_MENU_MATCHES_CONTEXTUAL[$_MENU_SELECTED_INDEX]}"
-  else
-    selected_cmd="${_MENU_MATCHES_GLOBAL[$_MENU_SELECTED_INDEX]}"
-  fi
-
-  # Set buffer to selected command
-  if [[ -n "$selected_cmd" ]]; then
-    BUFFER="$selected_cmd"
-    CURSOR=${#BUFFER}
-  fi
-
-  # Reset menu state
-  _menu_search_reset
-}
-
 # ============================================================================
 # CTRL+R Menu Widget Functions
 # ============================================================================
@@ -794,9 +774,40 @@ _autosuggest_clear_on_finish() {
 # Handle Enter in menu mode
 _menu_search_accept() {
   if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    # Accept selection and exit menu mode
-    _menu_accept_selection
-    zle reset-prompt
+    # Get the selected command from the appropriate array (contextual or global)
+    local selected_cmd=""
+    if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+      selected_cmd="${_MENU_MATCHES_CONTEXTUAL[$_MENU_SELECTED_INDEX]}"
+    else
+      selected_cmd="${_MENU_MATCHES_GLOBAL[$_MENU_SELECTED_INDEX]}"
+    fi
+
+    # CRITICAL: Set this to false BEFORE modifying BUFFER
+    # This prevents the line-pre-redraw hook from interfering
+    _MENU_SEARCH_ACTIVE=false
+
+    # Clean up menu state first
+    _MENU_SEARCH_QUERY=""
+    _MENU_MATCHES_CONTEXTUAL=()
+    _MENU_MATCHES_GLOBAL=()
+    _MENU_SELECTED_INDEX=1
+    _MENU_DISPLAY_OFFSET=0
+    _MENU_ORIGINAL_BUFFER=""
+
+    # Clear the menu display
+    zle -M ""
+
+    # NOW set buffer to selected command (after everything is cleaned up)
+    if [[ -n "$selected_cmd" ]]; then
+      BUFFER="$selected_cmd"
+      CURSOR=${#BUFFER}
+    fi
+
+    # Force a complete redraw to show the selected command
+    zle -R
+
+    # Return 0 to indicate success and prevent default Enter behavior
+    return 0
   else
     # Not in menu mode - just accept normally, the hook will clear suggestions
     zle .accept-line
