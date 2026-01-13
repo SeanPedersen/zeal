@@ -1187,6 +1187,9 @@ zsh-debug-keys() {
 # Command Execution Time Tracking & iTerm Title
 # ----------------------------------------------------------------------------
 
+# Initialize exit code to 0 (for first prompt)
+typeset -g cmd_exit_code=0
+
 function set_iterm_title() {
   echo -ne "\033]0;${PWD##*/} - $1\007"
 }
@@ -1211,12 +1214,18 @@ preexec() {
 }
 
 precmd() {
+  # MUST capture exit code first, before any other commands run
+  local last_exit_code=$?
+
   # Reset the git check flags for next prompt cycle
   _VCS_INFO_CURRENT_HEAD_CHECKED=false
   _VCS_INFO_REGENERATED_THIS_CYCLE=false
 
   # Calculate execution time
   if [ -n "$cmd_start_time" ]; then
+    # A command was executed - use its exit code
+    cmd_exit_code=$last_exit_code
+
     local cmd_end_time=$SECONDS
     # Convert to integer for arithmetic (handles both int and float SECONDS)
     local elapsed=$(( ${cmd_end_time%.*} - ${cmd_start_time%.*} ))
@@ -1232,6 +1241,8 @@ precmd() {
 
     unset cmd_start_time
   else
+    # No command was executed (empty line) - reset exit code
+    cmd_exit_code=0
     cmd_exec_time=""
   fi
 
@@ -1455,6 +1466,13 @@ sched +0 _auto_git_fetch
 POWERLINE_SEPARATOR=$'\uE0B0'  #
 
 # Prompt segments
+prompt_status() {
+  # Show red X if last command failed
+  if [[ $cmd_exit_code -ne 0 ]]; then
+    echo "%F{red}✗ %f"
+  fi
+}
+
 prompt_user() {
   local user="%n"
   local host="%m"
@@ -1510,7 +1528,7 @@ prompt_git() {
 }
 
 # Build prompt
-PROMPT='$(prompt_user)$(prompt_dir)$(prompt_git) '
+PROMPT='$(prompt_status)$(prompt_user)$(prompt_dir)$(prompt_git) '
 
 # Right prompt with execution time
 RPROMPT='%F{green}${cmd_exec_time:+took $cmd_exec_time} %D{%H:%M:%S}%f'
