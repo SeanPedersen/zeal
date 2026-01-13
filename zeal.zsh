@@ -1,59 +1,5 @@
 # ZEAL: smart & fast ZSH config
 
-# Startup Profiling (set PROFILE_STARTUP=true to enable)
-if [[ "$PROFILE_STARTUP" == "true" ]]; then
-  zmodload zsh/zprof
-  typeset -F SECONDS
-  typeset -F _PROFILE_START_TIME=$SECONDS
-  typeset -A _PROFILE_TIMES
-
-  _profile_mark() {
-    local mark_name="$1"
-    local current_time=$SECONDS
-    local elapsed=$(( current_time - _PROFILE_START_TIME ))
-    _PROFILE_TIMES[$mark_name]=$elapsed
-    # Uncomment to see real-time markers:
-    # echo "[PROFILE] $mark_name: ${elapsed}s"
-  }
-
-  _profile_report() {
-    echo ""
-    echo "=========================================="
-    echo "ZEAL STARTUP PROFILE"
-    echo "=========================================="
-
-    # Get marks in chronological order by sorting by time value
-    local -a sorted_marks
-    sorted_marks=(${(on)_PROFILE_TIMES})
-
-    local prev_time=0
-    local mark
-    for mark in start history_config_start history_config_end contextual_history_init_start contextual_history_init_end completion_start completion_end autosuggestions_start autosuggestions_end preexec_precmd_start preexec_precmd_end git_fetch_start prompt_setup_end contextual_history_async_start end; do
-      if [[ -n "${_PROFILE_TIMES[$mark]}" ]]; then
-        local total_time=${_PROFILE_TIMES[$mark]}
-        local delta=$(( total_time - prev_time ))
-        printf "%-35s %8.3fs (+%.3fs)\n" "$mark" "$total_time" "$delta"
-        prev_time=$total_time
-      fi
-    done
-    echo "=========================================="
-    printf "Total startup time: %.3fs\n" "${_PROFILE_TIMES[end]}"
-    echo ""
-
-    # Show detailed zprof if available
-    echo "Detailed function profiling:"
-    zprof | head -20
-  }
-
-  _profile_mark "start"
-else
-  # No-op functions when profiling is disabled
-  _profile_mark() { }
-  _profile_report() { }
-fi
-
-_profile_mark "history_config_start"
-
 # History settings
 HISTFILE=~/.zsh_history
 HISTSIZE=10000
@@ -68,8 +14,6 @@ setopt SHARE_HISTORY
 # Job control settings
 setopt NO_NOTIFY            # Don't report background job status immediately
 setopt NO_HUP               # Don't kill background jobs on shell exit
-
-_profile_mark "history_config_end"
 
 # Load hook utilities - deferred to reduce startup cost
 _init_hooks() {
@@ -98,8 +42,6 @@ sched +0 _init_hooks
 # ----------------------------------------------------------------------------
 # Contextual Command History (Directory-Aware Suggestions)
 # ----------------------------------------------------------------------------
-
-_profile_mark "contextual_history_init_start"
 
 # Global state for contextual history
 typeset -gA _CONTEXTUAL_HISTORY              # dir -> "cmd1\ncmd2\ncmd3" (newest first)
@@ -466,10 +408,7 @@ _menu_get_global_substring_matches() {
   return 1
 }
 
-_profile_mark "contextual_history_init_end"
-
 # Enable completion system (lazy-loaded)
-_profile_mark "completion_start"
 
 # Global state for completion system
 typeset -g _COMPLETION_LOADED=false
@@ -521,13 +460,9 @@ bindkey '^I' _completion_on_demand  # Tab key
 # Start loading immediately after prompt (will likely finish before first Tab press)
 sched +0 _load_compinit_now
 
-_profile_mark "completion_end"
-
 # ----------------------------------------------------------------------------
 # History-based Auto-complete
 # ----------------------------------------------------------------------------
-
-_profile_mark "autosuggestions_start"
 
 # Fish-style autosuggestions (lightweight native implementation)
 typeset -g _AUTOSUGGEST_SUGGESTION=""
@@ -1233,13 +1168,9 @@ zsh-debug-keys() {
   cat -v
 }
 
-_profile_mark "autosuggestions_end"
-
 # ----------------------------------------------------------------------------
 # Command Execution Time Tracking & iTerm Title
 # ----------------------------------------------------------------------------
-
-_profile_mark "preexec_precmd_start"
 
 function set_iterm_title() {
   echo -ne "\033]0;${PWD##*/} - $1\007"
@@ -1423,13 +1354,9 @@ precmd_vcs_info() {
 
 precmd_functions+=( precmd_check_git_head precmd_vcs_info )
 
-_profile_mark "preexec_precmd_end"
-
 # ----------------------------------------------------------------------------
 # Smart Git Fetch on Directory Change
 # ----------------------------------------------------------------------------
-
-_profile_mark "git_fetch_start"
 
 # Track current git repo
 typeset -g _CURRENT_GIT_REPO=""
@@ -1573,19 +1500,10 @@ PROMPT='$(prompt_user)$(prompt_dir)$(prompt_git) '
 # Right prompt with execution time
 RPROMPT='%F{green}${cmd_exec_time:+took $cmd_exec_time} %D{%H:%M:%S}%f'
 
-_profile_mark "prompt_setup_end"
-
 # ----------------------------------------------------------------------------
 # Initialize Contextual History
 # ----------------------------------------------------------------------------
 
-_profile_mark "contextual_history_async_start"
-
 # Defer loading contextual history to after prompt is displayed (non-blocking startup)
 # This improves perceived startup time significantly
 sched +0 _load_contextual_history_async
-
-_profile_mark "end"
-
-# Show profiling report if enabled
-_profile_report
