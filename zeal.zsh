@@ -444,30 +444,67 @@ _menu_get_global_substring_matches() {
 
 _profile_mark "contextual_history_init_end"
 
-# Enable completion system
+# Enable completion system (lazy-loaded)
 _profile_mark "completion_start"
 
-autoload -Uz compinit
-
-# Determine zcompdump location
+# Global state for completion system
+typeset -g _COMPLETION_LOADED=false
 typeset -g _ZCOMPDUMP="${ZDOTDIR:-$HOME}/.zcompdump"
 
-# Run compinit only once a day for performance
-# -C flag skips security check (much faster), only do full check once per day
-if [[ -f "$_ZCOMPDUMP" && -n "$_ZCOMPDUMP"(#qNmh+24) ]]; then
-  # File older than 24 hours - do full compinit with security check
-  compinit -d "$_ZCOMPDUMP"
-else
-  # File is recent - skip expensive security check
-  compinit -C -d "$_ZCOMPDUMP"
-fi
-
-# Completion options
+# Completion options (configure before compinit)
 zstyle ':completion:*' menu select
 # Smart matching: case insensitive, then prefix-or-substring (tries prefix first, falls back to substring)
 zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
 setopt COMPLETE_IN_WORD
 setopt AUTO_MENU
+
+# Function to load completion system synchronously
+_load_compinit_now() {
+  [[ "$_COMPLETION_LOADED" == "true" ]] && return
+
+  autoload -Uz compinit
+
+  # Run compinit only once a day for performance
+  # -C flag skips security check (much faster), only do full check once per day
+  if [[ -f "$_ZCOMPDUMP" && -n "$_ZCOMPDUMP"(#qNmh+24) ]]; then
+    # File older than 24 hours - do full compinit with security check
+    compinit -d "$_ZCOMPDUMP"
+  else
+    # File is recent - skip expensive security check
+    compinit -C -d "$_ZCOMPDUMP"
+  fi
+
+  _COMPLETION_LOADED=true
+}
+
+# Function to schedule async completion load in the main shell (not subprocess)
+_schedule_compinit_load() {
+  [[ "$_COMPLETION_LOADED" == "true" ]] && return
+
+  # Schedule the load to happen after prompt is displayed
+  # This runs in the main shell, just deferred
+  sched +0 _load_compinit_now
+}
+
+# Defer loading: intercept first Tab press
+_completion_on_demand() {
+  # If not loaded yet, load synchronously (fast enough for UX - will be pre-warmed)
+  if [[ "$_COMPLETION_LOADED" != "true" ]]; then
+    _load_compinit_now
+  fi
+
+  # Now run the actual completion
+  zle expand-or-complete
+}
+
+# Create ZLE widget for on-demand completion
+zle -N _completion_on_demand
+
+# Override Tab to use our on-demand loader
+bindkey '^I' _completion_on_demand  # Tab key
+
+# Start loading immediately after prompt (will likely finish before first Tab press)
+_schedule_compinit_load
 
 _profile_mark "completion_end"
 
