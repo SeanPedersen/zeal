@@ -28,7 +28,7 @@ if [[ "$PROFILE_STARTUP" == "true" ]]; then
 
     local prev_time=0
     local mark
-    for mark in start history_config_start history_config_end contextual_history_init_start contextual_history_init_end completion_start completion_end autosuggestions_start autosuggestions_end preexec_precmd_start preexec_precmd_end git_fetch_start prompt_setup_end aliases_load_start aliases_load_end contextual_history_async_start end; do
+    for mark in start history_config_start history_config_end contextual_history_init_start contextual_history_init_end completion_start completion_end autosuggestions_start autosuggestions_end preexec_precmd_start preexec_precmd_end git_fetch_start prompt_setup_end contextual_history_async_start end; do
       if [[ -n "${_PROFILE_TIMES[$mark]}" ]]; then
         local total_time=${_PROFILE_TIMES[$mark]}
         local delta=$(( total_time - prev_time ))
@@ -1573,28 +1573,6 @@ PROMPT='$(prompt_user)$(prompt_dir)$(prompt_git) '
 RPROMPT='%F{green}${cmd_exec_time:+took $cmd_exec_time} %D{%H:%M:%S}%f'
 
 _profile_mark "prompt_setup_end"
-
-# ----------------------------------------------------------------------------
-# Custom Functions & Aliases
-# ----------------------------------------------------------------------------
-
-_profile_mark "aliases_load_start"
-
-# Load custom aliases if exists (use -f for fast check)
-if [[ -f "$HOME/projects/aliases/.alias" ]]; then
-  source "$HOME/projects/aliases/.alias"
-fi
-
-if [[ -f "$HOME/.bash_aliases" ]]; then
-  source "$HOME/.bash_aliases"
-fi
-
-# Load local environment if exists
-if [[ -f "$HOME/.local/bin/env" ]]; then
-  source "$HOME/.local/bin/env"
-fi
-
-_profile_mark "aliases_load_end"
 
 # ----------------------------------------------------------------------------
 # Initialize Contextual History
