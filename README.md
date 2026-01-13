@@ -14,7 +14,7 @@
   - MacOS: ```brew install zsh```
   - Make default shell: ```chsh -s $(which zsh)```
 - Install ZEAL
-  - Download zeal.zsh
+  - Download [zeal.zsh](https://raw.githubusercontent.com/SeanPedersen/zeal/refs/heads/main/zeal.zsh) or clone this repo
   - Source it from .zshrc (recommended): ```source zeal.zsh```
     - or replace .zshrc: ```cp zeal.zsh ~/.zshrc```
 
