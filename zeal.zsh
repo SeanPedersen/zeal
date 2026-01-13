@@ -19,7 +19,7 @@ if [[ "$PROFILE_STARTUP" == "true" ]]; then
   _profile_report() {
     echo ""
     echo "=========================================="
-    echo "ZSHRC STARTUP PROFILE"
+    echo "ZEAL STARTUP PROFILE"
     echo "=========================================="
 
     # Get marks in chronological order by sorting by time value
