@@ -71,6 +71,30 @@ setopt NO_HUP               # Don't kill background jobs on shell exit
 
 _profile_mark "history_config_end"
 
+# Load hook utilities - deferred to reduce startup cost
+_init_hooks() {
+  autoload -U add-zle-hook-widget
+  autoload -U add-zsh-hook
+
+  # Load substring search widgets
+  autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+  zle -N up-line-or-beginning-search
+  zle -N down-line-or-beginning-search
+
+  # Register all ZLE hooks
+  add-zle-hook-widget line-pre-redraw _autosuggest_modify
+  add-zle-hook-widget line-finish _autosuggest_clear_on_finish
+  add-zle-hook-widget line-pre-redraw _history_cycle_check_reset
+  add-zle-hook-widget line-pre-redraw _menu_search_buffer_change
+
+  # Register directory change hooks
+  add-zsh-hook chpwd _auto_git_fetch
+  add-zsh-hook chpwd _history_cycle_reset
+}
+
+# Schedule hook initialization after prompt
+sched +0 _init_hooks
+
 # ----------------------------------------------------------------------------
 # Contextual Command History (Directory-Aware Suggestions)
 # ----------------------------------------------------------------------------
@@ -451,16 +475,16 @@ _profile_mark "completion_start"
 typeset -g _COMPLETION_LOADED=false
 typeset -g _ZCOMPDUMP="${ZDOTDIR:-$HOME}/.zcompdump"
 
-# Completion options (configure before compinit)
-zstyle ':completion:*' menu select
-# Smart matching: case insensitive, then prefix-or-substring (tries prefix first, falls back to substring)
-zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
-setopt COMPLETE_IN_WORD
-setopt AUTO_MENU
-
 # Function to load completion system synchronously
 _load_compinit_now() {
   [[ "$_COMPLETION_LOADED" == "true" ]] && return
+
+  # Completion options (configure before compinit)
+  zstyle ':completion:*' menu select
+  # Smart matching: case insensitive, then prefix-or-substring (tries prefix first, falls back to substring)
+  zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
+  setopt COMPLETE_IN_WORD
+  setopt AUTO_MENU
 
   autoload -Uz compinit
 
@@ -475,15 +499,6 @@ _load_compinit_now() {
   fi
 
   _COMPLETION_LOADED=true
-}
-
-# Function to schedule async completion load in the main shell (not subprocess)
-_schedule_compinit_load() {
-  [[ "$_COMPLETION_LOADED" == "true" ]] && return
-
-  # Schedule the load to happen after prompt is displayed
-  # This runs in the main shell, just deferred
-  sched +0 _load_compinit_now
 }
 
 # Defer loading: intercept first Tab press
@@ -504,7 +519,7 @@ zle -N _completion_on_demand
 bindkey '^I' _completion_on_demand  # Tab key
 
 # Start loading immediately after prompt (will likely finish before first Tab press)
-_schedule_compinit_load
+sched +0 _load_compinit_now
 
 _profile_mark "completion_end"
 
@@ -513,11 +528,6 @@ _profile_mark "completion_end"
 # ----------------------------------------------------------------------------
 
 _profile_mark "autosuggestions_start"
-
-# Substring search
-autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
-zle -N up-line-or-beginning-search
-zle -N down-line-or-beginning-search
 
 # Fish-style autosuggestions (lightweight native implementation)
 typeset -g _AUTOSUGGEST_SUGGESTION=""
@@ -580,10 +590,6 @@ _autosuggest_clear() {
 # Create ZLE widgets
 zle -N autosuggest-accept _autosuggest_accept
 zle -N autosuggest-clear _autosuggest_clear
-
-# Update suggestion on every keystroke
-autoload -U add-zle-hook-widget
-add-zle-hook-widget line-pre-redraw _autosuggest_modify
 
 # Reset history cycling state
 _history_cycle_reset() {
@@ -850,9 +856,6 @@ _autosuggest_clear_on_finish() {
   region_highlight=()
 }
 
-# Register the hook on line-finish
-add-zle-hook-widget line-finish _autosuggest_clear_on_finish
-
 # Handle Enter in menu mode
 _menu_search_accept() {
   if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
@@ -927,12 +930,6 @@ _history_cycle_check_reset() {
     fi
   fi
 }
-
-# Add hook to detect buffer changes
-add-zle-hook-widget line-pre-redraw _history_cycle_check_reset
-
-# Add hook to detect buffer changes in menu search mode
-add-zle-hook-widget line-pre-redraw _menu_search_buffer_change
 
 # Custom up-arrow: session history first (if empty buffer), then contextual, then global
 _autosuggest_up_or_history() {
@@ -1303,20 +1300,32 @@ precmd() {
 # Agnoster-style Prompt with Git Branch
 # ----------------------------------------------------------------------------
 
-# Enable colors
-autoload -Uz colors && colors
+# Colors work with %F{} syntax, no need to load colors module
 
-# Load version control info
-autoload -Uz vcs_info
+# Lazy-load vcs_info on first use
+typeset -g _VCS_INFO_LOADED=false
+
+# PROMPT_SUBST needed for dynamic prompt evaluation
 setopt PROMPT_SUBST
 
-# Configure vcs_info for git
-zstyle ':vcs_info:*' enable git
-zstyle ':vcs_info:*' check-for-changes true
-zstyle ':vcs_info:*' unstagedstr '●'
-zstyle ':vcs_info:*' stagedstr '✚'
-zstyle ':vcs_info:git:*' formats ' ⎇ %b%F{yellow}%u%c%f%m'
-zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%F{yellow}%u%c%f%m'
+_init_vcs_info() {
+  [[ "$_VCS_INFO_LOADED" == "true" ]] && return
+
+  # Load version control info
+  autoload -Uz vcs_info
+
+  # Configure vcs_info for git
+  zstyle ':vcs_info:*' enable git
+  zstyle ':vcs_info:*' check-for-changes true
+  zstyle ':vcs_info:*' unstagedstr '●'
+  zstyle ':vcs_info:*' stagedstr '✚'
+  zstyle ':vcs_info:git:*' formats ' ⎇ %b%F{yellow}%u%c%f%m'
+  zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%F{yellow}%u%c%f%m'
+
+  zstyle ':vcs_info:git*+set-message:*' hooks git-aheadbehind
+
+  _VCS_INFO_LOADED=true
+}
 
 # Git ahead/behind info (optimized with single git command)
 +vi-git-aheadbehind() {
@@ -1342,8 +1351,6 @@ zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%F{yellow}%u%c%f%m'
     fi
   fi
 }
-
-zstyle ':vcs_info:git*+set-message:*' hooks git-aheadbehind
 
 # Cache for vcs_info to prevent multiple calls
 typeset -g _VCS_INFO_CACHE=""
@@ -1384,6 +1391,9 @@ precmd_check_git_head() {
 
 # Update vcs_info before each prompt (with caching)
 precmd_vcs_info() {
+  # Initialize vcs_info on first call
+  _init_vcs_info
+
   # Use the HEAD and status that were checked once at the start of this prompt cycle
   local current_head="$_VCS_INFO_CURRENT_HEAD"
   local current_status="$_VCS_INFO_CURRENT_STATUS"
@@ -1420,9 +1430,6 @@ _profile_mark "preexec_precmd_end"
 # ----------------------------------------------------------------------------
 
 _profile_mark "git_fetch_start"
-
-# Load zsh hook system
-autoload -U add-zsh-hook
 
 # Track current git repo
 typeset -g _CURRENT_GIT_REPO=""
@@ -1496,12 +1503,6 @@ _auto_git_fetch() {
     _CURRENT_GIT_REPO=""
   fi
 }
-
-# Hook into directory changes
-add-zsh-hook chpwd _auto_git_fetch
-
-# Reset history cycling on directory change (more efficient than every command)
-add-zsh-hook chpwd _history_cycle_reset
 
 # Defer git fetch to after prompt is displayed (non-blocking startup)
 # Schedule to run after current event loop
