@@ -1208,13 +1208,16 @@ precmd() {
   if [[ -n "$_LAST_COMMAND" ]]; then
     if [[ $last_exit_code -eq 0 ]]; then
       # Command succeeded - add to global history and contextual history
-      # Manually append to history file in ZSH format
-      local timestamp=$EPOCHSECONDS
-      local hist_entry=": ${timestamp}:0;${_LAST_COMMAND}"
-      print -r -- "$hist_entry" >> "$HISTFILE"
+      # Skip short commands (< 4 chars) from global history (cd, ls, rm, cp, mv, pwd, etc.)
+      if (( ${#_LAST_COMMAND} >= 4 )); then
+        # Manually append to history file in ZSH format
+        local timestamp=$EPOCHSECONDS
+        local hist_entry=": ${timestamp}:0;${_LAST_COMMAND}"
+        print -r -- "$hist_entry" >> "$HISTFILE"
 
-      # Also add to in-memory history
-      print -s "$_LAST_COMMAND"
+        # Also add to in-memory history
+        print -s "$_LAST_COMMAND"
+      fi
 
       _store_contextual_history "$_LAST_COMMAND" "$_LAST_COMMAND_PWD"
       # Remove from failed commands if it was previously failed (command now works)
