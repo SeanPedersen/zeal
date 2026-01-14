@@ -1,9 +1,9 @@
 # ZEAL: smart & fast ZSH config
 
 ## ZEAL Features
-- Contextual auto-suggestion based on CWD + shell history
-- Custom CTRL + R: shows contextual command history of CWD + dual search (contextual + global history)
-- Agnoster theme (showing current git branch + status + commits)
+- Contextual auto-suggestion based on command history of CWD
+- Custom CTRL + R: show command history of CWD + dual search (contextual + global history)
+- Agnoster inspired theme (showing current git branch + status + commits)
   - runs git fetch (async) on first cd into a git repo (to show new commits from remote)
 - Shortens long paths (to first char)
 - Print execution timestamp + runtime in secs of last command
