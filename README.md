@@ -8,6 +8,10 @@
 - Shortens long paths (to first char)
 - Print execution timestamp + runtime in secs of last command
 
+
+https://github.com/user-attachments/assets/a89d975d-e0e7-4bf8-b050-e73b2621d48f
+
+
 ## Install ZEAL
 - Install ZSH
   - Debian: ```sudo apt install zsh``` Arch: ```pacman -S zsh```
