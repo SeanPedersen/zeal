@@ -147,10 +147,17 @@ _load_contextual_history_async() {
   } &!
 }
 
+# Track last command for post-execution validation
+typeset -g _LAST_COMMAND=""
+typeset -g _LAST_COMMAND_PWD=""
+typeset -g _LAST_EXIT_CODE=0
+
+# Track failed commands in current session (for filtering auto-suggestions)
+typeset -gA _FAILED_COMMANDS  # command -> 1 (hash set for O(1) lookup)
+
 # Hook to capture commands with directory context
 zshaddhistory() {
   local command="${1%%$'\n'}"
-  local reject_command=false
 
   # Skip if empty or starts with space (HIST_IGNORE_SPACE)
   [[ -z "$command" || "$command" == " "* ]] && return 0
@@ -161,6 +168,19 @@ zshaddhistory() {
   if (( ${#_SESSION_HISTORY_COMMANDS[@]} > _SESSION_HISTORY_MAX )); then
     _SESSION_HISTORY_COMMANDS=(${_SESSION_HISTORY_COMMANDS[@]:(-$_SESSION_HISTORY_MAX)})
   fi
+
+  # Store command for post-execution processing (will check exit code in precmd)
+  _LAST_COMMAND="$command"
+  _LAST_COMMAND_PWD="$PWD"
+
+  # Allow all commands in global history (we'll remove failed ones later)
+  return 0
+}
+
+# Store command in contextual history (called after execution with known exit code)
+_store_contextual_history() {
+  local command="$1"
+  local cmd_pwd="$2"
 
   # Check if command should be stored in contextual history
   local first_word="${command%% *}"
@@ -176,61 +196,24 @@ zshaddhistory() {
     store_contextual=false
   fi
 
-  # Validate that the command exists (skip invalid commands)
-  if [[ "$store_contextual" == "true" ]]; then
-    # Check if first word is a valid command, function, alias, builtin, or keyword
-    # This prevents "command not found" entries from being stored
-    if ! (whence -w "$first_word" &>/dev/null); then
-      store_contextual=false
-      reject_command=true
-    fi
-
-    # Special validation for cd command - check if target directory exists
-    if [[ "$first_word" == "cd" ]]; then
-      # Extract everything after 'cd' (use word splitting)
-      local -a cmd_parts
-      cmd_parts=(${=command})
-      local cd_target="${cmd_parts[2]}"
-
-      # Handle special cases
-      if [[ -z "$cd_target" || "$cd_target" == "-" || "$cd_target" == "~" ]]; then
-        # cd with no args (goes to $HOME), cd -, or cd ~ are always valid
-        :
-      elif [[ "$cd_target" == "~/"* ]]; then
-        # Expand ~ for validation
-        local expanded="${HOME}/${cd_target#~/}"
-        if [[ ! -d "$expanded" ]]; then
-          store_contextual=false
-          reject_command=true
-        fi
-      else
-        # Check if directory exists (relative or absolute path)
-        if [[ ! -d "$cd_target" ]]; then
-          store_contextual=false
-          reject_command=true
-        fi
-      fi
-    fi
-  fi
-
-  # Only store in contextual history if not whitelisted and valid
+  # Only store in contextual history if not whitelisted
   if [[ "$store_contextual" == "true" ]]; then
     # Append to contextual history file (async writes are fine)
-    echo "$PWD|||$command" >> "$_CONTEXTUAL_HISTORY_FILE"
+    echo "$cmd_pwd|||$command" >> "$_CONTEXTUAL_HISTORY_FILE"
 
     # Update in-memory index immediately (if loaded)
     if [[ "$_CONTEXTUAL_HISTORY_LOADED" == "true" ]]; then
       # Prepend to directory's command list (newest first)
-      if [[ -n "${_CONTEXTUAL_HISTORY[$PWD]}" ]]; then
-        _CONTEXTUAL_HISTORY[$PWD]="${command}"$'\n'"${_CONTEXTUAL_HISTORY[$PWD]}"
+      if [[ -n "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" ]]; then
+        _CONTEXTUAL_HISTORY[$cmd_pwd]="${command}"$'\n'"${_CONTEXTUAL_HISTORY[$cmd_pwd]}"
       else
-        _CONTEXTUAL_HISTORY[$PWD]="${command}"
+        _CONTEXTUAL_HISTORY[$cmd_pwd]="${command}"
       fi
 
       # Limit in-memory entries per directory to 100 (prevent memory bloat)
-      local cmd_count=$(echo "${_CONTEXTUAL_HISTORY[$PWD]}" | wc -l)
+      local cmd_count=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | wc -l)
       if (( cmd_count > 100 )); then
-        _CONTEXTUAL_HISTORY[$PWD]=$(echo "${_CONTEXTUAL_HISTORY[$PWD]}" | head -100)
+        _CONTEXTUAL_HISTORY[$cmd_pwd]=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | head -100)
       fi
     fi
 
@@ -240,9 +223,6 @@ zshaddhistory() {
         mv "${_CONTEXTUAL_HISTORY_FILE}.tmp" "$_CONTEXTUAL_HISTORY_FILE" 2>/dev/null ) &!
     fi
   fi
-
-  # Return 1 to reject from global history if command failed validation
-  [[ "$reject_command" == "true" ]] && return 1 || return 0
 }
 
 # Fast contextual search for auto-suggestions
@@ -494,6 +474,11 @@ _autosuggest_modify() {
     fi
 
     if [[ -n "$suggestion" ]]; then
+      # Skip if this command failed in the current session
+      if [[ -n "${_FAILED_COMMANDS[$suggestion]}" ]]; then
+        return
+      fi
+
       # Check if suggestion starts with current buffer and is different
       if [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
         # Extract the completion part
@@ -901,7 +886,7 @@ _autosuggest_up_or_history() {
       # Empty buffer: start with session history
       _HISTORY_CYCLE_STATE="session"
 
-      # Populate session matches (reverse order - newest first)
+      # Populate session matches (reverse order - newest first), including ALL commands
       _HISTORY_CYCLE_SESSION=()
       local -i i
       for (( i=${#_SESSION_HISTORY_COMMANDS[@]}; i>0; i-- )); do
@@ -1216,6 +1201,31 @@ preexec() {
 precmd() {
   # MUST capture exit code first, before any other commands run
   local last_exit_code=$?
+
+  # Process last command based on exit code
+  if [[ -n "$_LAST_COMMAND" ]]; then
+    if [[ $last_exit_code -eq 0 ]]; then
+      # Command succeeded - store in contextual history
+      _store_contextual_history "$_LAST_COMMAND" "$_LAST_COMMAND_PWD"
+      # Remove from failed commands if it was previously failed (command now works)
+      unset "_FAILED_COMMANDS[$_LAST_COMMAND]"
+    else
+      # Command failed - remove from global history and track as failed
+      _FAILED_COMMANDS[$_LAST_COMMAND]=1
+
+      # Remove from global history
+      fc -W  # Write current history to file
+      if [[ -f "$HISTFILE" ]]; then
+        local temp_hist="${HISTFILE}.tmp.$$"
+        sed '$d' "$HISTFILE" > "$temp_hist" && mv "$temp_hist" "$HISTFILE"
+      fi
+      fc -R  # Reload history from file
+    fi
+  fi
+
+  # Clear the last command tracking
+  _LAST_COMMAND=""
+  _LAST_COMMAND_PWD=""
 
   # Reset the git check flags for next prompt cycle
   _VCS_INFO_CURRENT_HEAD_CHECKED=false
