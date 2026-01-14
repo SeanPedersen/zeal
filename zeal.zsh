@@ -10,6 +10,7 @@ setopt HIST_REDUCE_BLANKS   # Remove unnecessary blank lines.
 setopt HIST_FIND_NO_DUPS
 setopt HIST_SAVE_NO_DUPS
 setopt SHARE_HISTORY
+setopt INC_APPEND_HISTORY   # Write to history file immediately
 
 # Job control settings
 setopt NO_NOTIFY            # Don't report background job status immediately
@@ -150,7 +151,7 @@ _load_contextual_history_async() {
 # Track last command for post-execution validation
 typeset -g _LAST_COMMAND=""
 typeset -g _LAST_COMMAND_PWD=""
-typeset -g _LAST_EXIT_CODE=0
+typeset -g _PENDING_HISTORY_ENTRY=""
 
 # Track failed commands in current session (for filtering auto-suggestions)
 typeset -gA _FAILED_COMMANDS  # command -> 1 (hash set for O(1) lookup)
@@ -172,9 +173,10 @@ zshaddhistory() {
   # Store command for post-execution processing (will check exit code in precmd)
   _LAST_COMMAND="$command"
   _LAST_COMMAND_PWD="$PWD"
+  _PENDING_HISTORY_ENTRY="$1"
 
-  # Allow all commands in global history (we'll remove failed ones later)
-  return 0
+  # Reject from history for now - we'll add it back in precmd if it succeeds
+  return 1
 }
 
 # Store command in contextual history (called after execution with known exit code)
@@ -1205,27 +1207,28 @@ precmd() {
   # Process last command based on exit code
   if [[ -n "$_LAST_COMMAND" ]]; then
     if [[ $last_exit_code -eq 0 ]]; then
-      # Command succeeded - store in contextual history
+      # Command succeeded - add to global history and contextual history
+      # Manually append to history file in ZSH format
+      local timestamp=$EPOCHSECONDS
+      local hist_entry=": ${timestamp}:0;${_LAST_COMMAND}"
+      print -r -- "$hist_entry" >> "$HISTFILE"
+
+      # Also add to in-memory history
+      print -s "$_LAST_COMMAND"
+
       _store_contextual_history "$_LAST_COMMAND" "$_LAST_COMMAND_PWD"
       # Remove from failed commands if it was previously failed (command now works)
       unset "_FAILED_COMMANDS[$_LAST_COMMAND]"
     else
-      # Command failed - remove from global history and track as failed
+      # Command failed - track as failed, don't add to global history
       _FAILED_COMMANDS[$_LAST_COMMAND]=1
-
-      # Remove from global history
-      fc -W  # Write current history to file
-      if [[ -f "$HISTFILE" ]]; then
-        local temp_hist="${HISTFILE}.tmp.$$"
-        sed '$d' "$HISTFILE" > "$temp_hist" && mv "$temp_hist" "$HISTFILE"
-      fi
-      fc -R  # Reload history from file
     fi
   fi
 
   # Clear the last command tracking
   _LAST_COMMAND=""
   _LAST_COMMAND_PWD=""
+  _PENDING_HISTORY_ENTRY=""
 
   # Reset the git check flags for next prompt cycle
   _VCS_INFO_CURRENT_HEAD_CHECKED=false
