@@ -812,6 +812,9 @@ _menu_search_cancel() {
     # This prevents the line-pre-redraw hook from re-rendering the menu
     _MENU_SEARCH_ACTIVE=false
 
+    # Save the original buffer before cleanup
+    local saved_buffer="$_MENU_ORIGINAL_BUFFER"
+
     # Clean up ALL state variables immediately
     _MENU_SEARCH_QUERY=""
     _MENU_MATCHES_CONTEXTUAL=()
@@ -820,11 +823,9 @@ _menu_search_cancel() {
     _MENU_DISPLAY_OFFSET=0
     _MENU_ORIGINAL_BUFFER=""
 
-    # Clear ALL ZLE buffers and state
-    BUFFER=""
-    LBUFFER=""
-    RBUFFER=""
-    CURSOR=0
+    # Restore the original buffer (what was there before entering menu mode)
+    BUFFER="$saved_buffer"
+    CURSOR=${#BUFFER}
     POSTDISPLAY=""
 
     # Clear autosuggestion state
