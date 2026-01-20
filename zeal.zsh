@@ -1209,8 +1209,23 @@ precmd() {
   if [[ -n "$_LAST_COMMAND" ]]; then
     if [[ $last_exit_code -eq 0 ]]; then
       # Command succeeded - add to global history and contextual history
+      local should_add_to_global=true
+
       # Skip short commands (< 4 chars) from global history (cd, ls, rm, cp, mv, pwd, etc.)
-      if (( ${#_LAST_COMMAND} >= 4 )); then
+      if (( ${#_LAST_COMMAND} < 4 )); then
+        should_add_to_global=false
+      fi
+
+      # Special handling for cd commands: only add absolute paths to global history
+      if [[ "$_LAST_COMMAND" == "cd "* ]]; then
+        local cd_target="${_LAST_COMMAND#cd }"
+        # Only add to global if it's an absolute path (starts with / or ~)
+        if [[ "$cd_target" != "/"* && "$cd_target" != "~"* ]]; then
+          should_add_to_global=false
+        fi
+      fi
+
+      if [[ "$should_add_to_global" == "true" ]]; then
         # Manually append to history file in ZSH format
         local timestamp=$EPOCHSECONDS
         local hist_entry=": ${timestamp}:0;${_LAST_COMMAND}"
