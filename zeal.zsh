@@ -1287,35 +1287,29 @@ precmd() {
       if [[ "$should_add_to_global" == "true" ]]; then
         local -a args
         args=(${(z)_LAST_COMMAND})
-        local cmd_name="${args[1]}"
 
-        # Start from second element (skip command name)
+        # Check every argument to see if it's a relative path that exists
+        # Use cheap string checks first to filter out obvious non-paths
         for arg in "${args[@]:1}"; do
-          # Skip flags
+          # Skip flags (start with -)
           [[ "$arg" == "-"* ]] && continue
 
-          # Check if argument is a relative path:
-          # 1. Contains a slash but doesn't start with / or ~ or contain ://
-          # 2. Starts with ./ or ../
-          # 3. Looks like a file with extension (contains .) and exists
-          # 4. For path-based commands (cd, pushd, popd), single . or .. counts as path
-          if [[ ( "$arg" == *"/"* && "$arg" != "/"* && "$arg" != "~"* && "$arg" != *"://"* ) || "$arg" == "./"* || "$arg" == "../"* ]]; then
-            # Check if this path actually exists in the directory where command was run
-            # Use subshell to check in the original directory without changing current PWD
-            if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -e "$arg" ]] ); then
-              # It's a real relative path - exclude from global history
-              should_add_to_global=false
-              break
-            fi
-          elif [[ "$arg" == *"."* && "$arg" != "." && "$arg" != ".." ]]; then
-            # Looks like a file with extension - check if it exists (fast check, no cd needed if in same dir)
-            if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -f "$arg" ]] ); then
-              # It's a relative file reference - exclude from global history
-              should_add_to_global=false
-              break
-            fi
-          elif [[ ( "$arg" == "." || "$arg" == ".." ) && ( "$cmd_name" == "cd" || "$cmd_name" == "pushd" || "$cmd_name" == "popd" ) ]]; then
-            # Single . or .. only counts as relative path for directory navigation commands
+          # Skip absolute paths and tilde paths (these are fine for global history)
+          [[ "$arg" == "/"* || "$arg" == "~"* ]] && continue
+
+          # Skip URLs (contain ://)
+          [[ "$arg" == *"://"* ]] && continue
+
+          # Skip pure numbers (ports, PIDs, counts, etc.)
+          [[ "$arg" =~ ^[0-9]+$ ]] && continue
+
+          # Skip very short strings (likely options like -v, -d, single chars)
+          (( ${#arg} < 2 )) && continue
+
+          # Now check if this argument exists as a file or directory (relative path)
+          # This catches all cases: cd Desktop, vim file.txt, cat ../foo, open ./bar, etc.
+          if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -e "$arg" ]] ); then
+            # It's a relative path that exists - exclude from global history
             should_add_to_global=false
             break
           fi
