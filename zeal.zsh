@@ -1292,33 +1292,14 @@ precmd() {
         fi
       fi
 
-      # Special handling for ls commands: only add absolute paths to global history
-      if [[ "$_LAST_COMMAND" == "ls "* ]]; then
-        local ls_target="${_LAST_COMMAND#ls }"
-        # Extract the path argument (skip flags like -la, -l, etc.)
+      # Special handling for ls, rm, bash, open: only add absolute paths to global history
+      if [[ "$_LAST_COMMAND" == "ls "* || "$_LAST_COMMAND" == "rm "* || "$_LAST_COMMAND" == "bash "* || "$_LAST_COMMAND" == "open "* ]]; then
+        # Extract command and arguments
+        local cmd_args="${_LAST_COMMAND#* }"
+        # Extract the path argument (skip flags)
         local path_arg=""
         local -a args
-        args=(${(z)ls_target})
-        for arg in "${args[@]}"; do
-          # Skip flags (starting with -)
-          if [[ "$arg" != "-"* ]]; then
-            path_arg="$arg"
-            break
-          fi
-        done
-        # Only add to global if path is an absolute path (starts with / or ~)
-        if [[ -n "$path_arg" && "$path_arg" != "/"* && "$path_arg" != "~"* ]]; then
-          should_add_to_global=false
-        fi
-      fi
-
-      # Special handling for rm commands: only add absolute paths to global history
-      if [[ "$_LAST_COMMAND" == "rm "* ]]; then
-        local rm_target="${_LAST_COMMAND#rm }"
-        # Extract the path argument (skip flags like -rf, -r, etc.)
-        local path_arg=""
-        local -a args
-        args=(${(z)rm_target})
+        args=(${(z)cmd_args})
         for arg in "${args[@]}"; do
           # Skip flags (starting with -)
           if [[ "$arg" != "-"* ]]; then
