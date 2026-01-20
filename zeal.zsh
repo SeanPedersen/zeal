@@ -227,7 +227,7 @@ _store_contextual_history() {
   fi
 }
 
-# Fast contextual search for auto-suggestions
+# Fast contextual search for auto-suggestions (prefix match)
 _search_contextual_history() {
   local buffer="$1"
 
@@ -252,6 +252,40 @@ _search_contextual_history() {
 
     # Check if this command starts with the buffer
     if [[ "$line" == "$buffer"* && "$line" != "$buffer" ]]; then
+      echo "$line"
+      return 0
+    fi
+  done <<< "$cmd_list"
+
+  # No match found
+  return 1
+}
+
+# Contextual search for auto-suggestions using substring match (fallback)
+_search_contextual_history_substring() {
+  local buffer="$1"
+
+  # If not loaded yet, return nothing (will fall back to global)
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+
+  # Check if command is in global whitelist
+  local first_word="${buffer%% *}"
+  if (( ${_CONTEXTUAL_HISTORY_GLOBAL_WHITELIST[(I)$first_word]} )); then
+    # Command is whitelisted - skip contextual lookup
+    return 1
+  fi
+
+  # Get command list for current directory
+  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+  [[ -z "$cmd_list" ]] && return 1
+
+  # Search through commands (newest first) for substring match
+  local line
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    # Check if this command contains the buffer as substring (but doesn't start with it)
+    if [[ "$line" == *"$buffer"* && "$line" != "$buffer"* && "$line" != "$buffer" ]]; then
       echo "$line"
       return 0
     fi
@@ -465,14 +499,30 @@ _autosuggest_modify() {
   if [[ -n "$BUFFER" && $CURSOR -eq ${#BUFFER} ]]; then
     local suggestion=""
 
-    # Try contextual history first (blazingly fast!)
+    # Try contextual history first with prefix match (blazingly fast!)
     suggestion=$(_search_contextual_history "$BUFFER")
 
-    # Fall back to global history if no contextual match
+    # Fall back to global history prefix match if no contextual match
     if [[ -z "$suggestion" ]]; then
       suggestion=$(fc -lnm "${BUFFER}*" -1 1 2>/dev/null | head -n1)
       # Remove leading spaces from global history
       suggestion="${suggestion## }"
+    fi
+
+    # If still no match, try substring search in contextual history
+    if [[ -z "$suggestion" ]]; then
+      suggestion=$(_search_contextual_history_substring "$BUFFER")
+    fi
+
+    # Final fallback: substring search in global history
+    if [[ -z "$suggestion" ]]; then
+      suggestion=$(fc -lnm "*${BUFFER}*" -1 1 2>/dev/null | head -n1)
+      # Remove leading spaces from global history
+      suggestion="${suggestion## }"
+      # Make sure it's not a prefix match (we already tried those)
+      if [[ -n "$suggestion" && "$suggestion" == "$BUFFER"* ]]; then
+        suggestion=""
+      fi
     fi
 
     if [[ -n "$suggestion" ]]; then
@@ -481,7 +531,7 @@ _autosuggest_modify() {
         return
       fi
 
-      # Check if suggestion starts with current buffer and is different
+      # For prefix matches, extract the completion part
       if [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
         # Extract the completion part
         _AUTOSUGGEST_SUGGESTION="${suggestion#$BUFFER}"
@@ -491,6 +541,16 @@ _autosuggest_modify() {
 
         # Highlight it in grey
         region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold autosuggest")
+      # For substring matches, show the full command
+      elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == *"$BUFFER"* ]]; then
+        # Show full command as suggestion
+        _AUTOSUGGEST_SUGGESTION="$suggestion"
+
+        # Add grey suggestion to buffer display
+        POSTDISPLAY=" → $_AUTOSUGGEST_SUGGESTION"
+
+        # Highlight it in grey (different style to indicate substring match)
+        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
       fi
     fi
   fi
@@ -498,7 +558,14 @@ _autosuggest_modify() {
 
 _autosuggest_accept() {
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
-    BUFFER="$BUFFER$_AUTOSUGGEST_SUGGESTION"
+    # Check if it's a substring match (contains " → ")
+    if [[ "$POSTDISPLAY" == " → "* ]]; then
+      # Replace buffer with the full suggestion (substring match)
+      BUFFER="$_AUTOSUGGEST_SUGGESTION"
+    else
+      # Append the completion part (prefix match)
+      BUFFER="$BUFFER$_AUTOSUGGEST_SUGGESTION"
+    fi
     CURSOR=${#BUFFER}
     _AUTOSUGGEST_SUGGESTION=""
     POSTDISPLAY=""
