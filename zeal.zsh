@@ -1283,34 +1283,35 @@ precmd() {
         should_add_to_global=false
       fi
 
-      # Special handling for cd commands: only add absolute paths to global history
-      if [[ "$_LAST_COMMAND" == "cd "* ]]; then
-        local cd_target="${_LAST_COMMAND#cd }"
-        # Only add to global if it's an absolute path (starts with / or ~)
-        if [[ "$cd_target" != "/"* && "$cd_target" != "~"* ]]; then
-          should_add_to_global=false
-        fi
-      fi
-
-      # Special handling for ls, rm, bash, open: only add absolute paths to global history
-      if [[ "$_LAST_COMMAND" == "ls "* || "$_LAST_COMMAND" == "rm "* || "$_LAST_COMMAND" == "bash "* || "$_LAST_COMMAND" == "open "* ]]; then
-        # Extract command and arguments
-        local cmd_args="${_LAST_COMMAND#* }"
-        # Extract the path argument (skip flags)
-        local path_arg=""
+      # General handling: exclude commands with relative paths from global history
+      if [[ "$should_add_to_global" == "true" ]]; then
         local -a args
-        args=(${(z)cmd_args})
-        for arg in "${args[@]}"; do
-          # Skip flags (starting with -)
-          if [[ "$arg" != "-"* ]]; then
-            path_arg="$arg"
+        args=(${(z)_LAST_COMMAND})
+        local cmd_name="${args[1]}"
+
+        # Start from second element (skip command name)
+        for arg in "${args[@]:1}"; do
+          # Skip flags
+          [[ "$arg" == "-"* ]] && continue
+
+          # Check if argument is a relative path:
+          # 1. Contains a slash but doesn't start with / or ~ or contain ://
+          # 2. Starts with ./ or ../
+          # 3. For path-based commands (cd, pushd, popd), single . or .. counts as path
+          if [[ ( "$arg" == *"/"* && "$arg" != "/"* && "$arg" != "~"* && "$arg" != *"://"* ) || "$arg" == "./"* || "$arg" == "../"* ]]; then
+            # Check if this path actually exists in the directory where command was run
+            # Use subshell to check in the original directory without changing current PWD
+            if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -e "$arg" ]] ); then
+              # It's a real relative path - exclude from global history
+              should_add_to_global=false
+              break
+            fi
+          elif [[ ( "$arg" == "." || "$arg" == ".." ) && ( "$cmd_name" == "cd" || "$cmd_name" == "pushd" || "$cmd_name" == "popd" ) ]]; then
+            # Single . or .. only counts as relative path for directory navigation commands
+            should_add_to_global=false
             break
           fi
         done
-        # Only add to global if path is an absolute path (starts with / or ~)
-        if [[ -n "$path_arg" && "$path_arg" != "/"* && "$path_arg" != "~"* ]]; then
-          should_add_to_global=false
-        fi
       fi
 
       if [[ "$should_add_to_global" == "true" ]]; then
