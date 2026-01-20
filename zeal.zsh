@@ -1297,12 +1297,20 @@ precmd() {
           # Check if argument is a relative path:
           # 1. Contains a slash but doesn't start with / or ~ or contain ://
           # 2. Starts with ./ or ../
-          # 3. For path-based commands (cd, pushd, popd), single . or .. counts as path
+          # 3. Looks like a file with extension (contains .) and exists
+          # 4. For path-based commands (cd, pushd, popd), single . or .. counts as path
           if [[ ( "$arg" == *"/"* && "$arg" != "/"* && "$arg" != "~"* && "$arg" != *"://"* ) || "$arg" == "./"* || "$arg" == "../"* ]]; then
             # Check if this path actually exists in the directory where command was run
             # Use subshell to check in the original directory without changing current PWD
             if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -e "$arg" ]] ); then
               # It's a real relative path - exclude from global history
+              should_add_to_global=false
+              break
+            fi
+          elif [[ "$arg" == *"."* && "$arg" != "." && "$arg" != ".." ]]; then
+            # Looks like a file with extension - check if it exists (fast check, no cd needed if in same dir)
+            if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -f "$arg" ]] ); then
+              # It's a relative file reference - exclude from global history
               should_add_to_global=false
               break
             fi
