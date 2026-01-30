@@ -298,6 +298,60 @@ _search_contextual_history_substring() {
   return 1
 }
 
+# Search global history file for prefix match (for auto-suggestion fallback)
+_search_global_history() {
+  local buffer="$1"
+  local history_file="${HISTFILE:-$HOME/.zsh_history}"
+  [[ ! -f "$history_file" ]] && return 1
+
+  local line cmd
+  while IFS= read -r line; do
+    # ZSH history format: ": timestamp:elapsed;command" or plain command
+    if [[ "$line" == ":"*";"* ]]; then
+      cmd="${line#*;}"
+    else
+      cmd="$line"
+    fi
+
+    [[ -z "$cmd" ]] && continue
+
+    # Check prefix match
+    if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
+      echo "$cmd"
+      return 0
+    fi
+  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+
+  return 1
+}
+
+# Search global history file for substring match (for auto-suggestion fallback)
+_search_global_history_substring() {
+  local buffer="$1"
+  local history_file="${HISTFILE:-$HOME/.zsh_history}"
+  [[ ! -f "$history_file" ]] && return 1
+
+  local line cmd
+  while IFS= read -r line; do
+    # ZSH history format: ": timestamp:elapsed;command" or plain command
+    if [[ "$line" == ":"*";"* ]]; then
+      cmd="${line#*;}"
+    else
+      cmd="$line"
+    fi
+
+    [[ -z "$cmd" ]] && continue
+
+    # Check substring match (but not prefix - we already tried those)
+    if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
+      echo "$cmd"
+      return 0
+    fi
+  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+
+  return 1
+}
+
 # Get all contextual matches for cycling (used by arrow-up)
 _get_all_contextual_matches() {
   local buffer="$1"
@@ -509,13 +563,17 @@ _autosuggest_modify() {
           "$LASTWIDGET" == "expand-or-complete" || \
           "$LASTWIDGET" == "complete-word" || \
           "$LASTWIDGET" == "menu-complete" || \
-          "$LASTWIDGET" == "reverse-menu-complete" ]]; then
+          "$LASTWIDGET" == "reverse-menu-complete" || \
+          "$LASTWIDGET" == ".expand-or-complete" || \
+          "$LASTWIDGET" == ".complete-word" ]]; then
       from_completion=true
     fi
 
     # Exit TAB mode only when user types a non-space character
     if [[ "$from_completion" != "true" && "${BUFFER: -1}" != " " ]]; then
       _TAB_COMPLETION_ACTIVE=false
+      # Don't process suggestions in the same cycle - let next redraw handle it
+      return
     else
       # Still in TAB completion mode - don't touch the display
       return
@@ -531,30 +589,22 @@ _autosuggest_modify() {
   if [[ -n "$BUFFER" && $CURSOR -eq ${#BUFFER} ]]; then
     local suggestion=""
 
-    # Try contextual history first with prefix match (blazingly fast!)
+    # 1. Contextual prefix match (directory-aware)
     suggestion=$(_search_contextual_history "$BUFFER")
 
-    # Fall back to global history prefix match if no contextual match
-    if [[ -z "$suggestion" ]]; then
-      suggestion=$(fc -lnm "${BUFFER}*" -1 1 2>/dev/null | head -n1)
-      # Remove leading spaces from global history
-      suggestion="${suggestion## }"
-    fi
-
-    # If still no match, try substring search in contextual history
+    # 2. Contextual substring match (directory-aware)
     if [[ -z "$suggestion" ]]; then
       suggestion=$(_search_contextual_history_substring "$BUFFER")
     fi
 
-    # Final fallback: substring search in global history
+    # 3. Global history file prefix match (excludes current session)
     if [[ -z "$suggestion" ]]; then
-      suggestion=$(fc -lnm "*${BUFFER}*" -1 1 2>/dev/null | head -n1)
-      # Remove leading spaces from global history
-      suggestion="${suggestion## }"
-      # Make sure it's not a prefix match (we already tried those)
-      if [[ -n "$suggestion" && "$suggestion" == "$BUFFER"* ]]; then
-        suggestion=""
-      fi
+      suggestion=$(_search_global_history "$BUFFER")
+    fi
+
+    # 4. Global history file substring match (excludes current session)
+    if [[ -z "$suggestion" ]]; then
+      suggestion=$(_search_global_history_substring "$BUFFER")
     fi
 
     if [[ -n "$suggestion" ]]; then
@@ -1011,6 +1061,9 @@ _autosuggest_clear_on_finish() {
 
 # Handle Enter in menu mode
 _menu_search_accept() {
+  # Reset TAB completion flag on Enter
+  _TAB_COMPLETION_ACTIVE=false
+
   if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
     local selected_cmd=""
 
@@ -1061,6 +1114,9 @@ _menu_search_accept() {
 
 # Handle ESC/CTRL+G in menu mode (cancel)
 _menu_search_cancel() {
+  # Reset TAB completion flag on cancel
+  _TAB_COMPLETION_ACTIVE=false
+
   if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
     # CRITICAL: Set these to false FIRST, before any operations
     # This prevents the line-pre-redraw hook from re-rendering the menu
@@ -1453,6 +1509,9 @@ function set_iterm_title() {
 preexec() {
   # Reset history cycling when executing a command (start fresh for next ARROW UP)
   _history_cycle_reset
+
+  # Reset TAB completion flag
+  _TAB_COMPLETION_ACTIVE=false
 
   # Clear any remaining auto-suggestions
   _AUTOSUGGEST_SUGGESTION=""
