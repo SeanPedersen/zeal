@@ -72,14 +72,17 @@ typeset -g _HISTORY_CYCLE_PWD=""             # Directory where cycling started
 
 # CTRL+R visual menu search state
 typeset -g _MENU_SEARCH_ACTIVE=false          # Are we in menu search mode?
+typeset -g _MENU_EXPLICIT_MODE=false          # Was menu started via CTRL+R (vs auto-dropdown)?
 typeset -g _MENU_SEARCH_QUERY=""              # Current search query
 typeset -ga _MENU_MATCHES_CONTEXTUAL          # Array of contextual matches
 typeset -ga _MENU_MATCHES_GLOBAL              # Array of global matches
-typeset -g _MENU_SELECTED_INDEX=1             # Currently selected item (1-based)
+typeset -g _MENU_SELECTED_INDEX=0             # Currently selected item (1-based, 0 = none selected)
+typeset -g _MENU_DROPDOWN_ENTERED=false       # Has user explicitly entered dropdown (via arrow down)?
 typeset -g _MENU_DISPLAY_OFFSET=0             # Scroll offset for long lists
 typeset -g _MENU_ORIGINAL_BUFFER=""           # Buffer before search started
 typeset -g _MENU_ORIGINAL_KEYMAP=""           # Keymap before search started
-typeset -g _MENU_MAX_DISPLAY=12               # Max items to display at once
+typeset -g _MENU_MAX_DISPLAY=5                # Max items to display at once (5 for auto-dropdown)
+typeset -g _TAB_COMPLETION_ACTIVE=false       # Flag to suppress dropdown during TAB completion
 
 # Signal handler for async load completion (using USR2, USR1 is used by git fetch)
 TRAPUSR2() {
@@ -467,7 +470,15 @@ _completion_on_demand() {
     _load_compinit_now
   fi
 
-  # Now run the actual completion
+  # Clear any existing autosuggestion before TAB completion
+  POSTDISPLAY=""
+  region_highlight=("${(@)region_highlight:#*autosuggest*}")
+
+  # Set flag to suppress dropdown during TAB completion
+  _TAB_COMPLETION_ACTIVE=true
+
+  # Run the actual completion
+  # Note: flag is reset in _autosuggest_modify when user types new content
   zle expand-or-complete
 }
 
@@ -489,6 +500,27 @@ typeset -g _AUTOSUGGEST_SUGGESTION=""
 
 _autosuggest_modify() {
   emulate -L zsh
+
+  # During TAB completion, don't modify display at all to avoid interference
+  if [[ "$_TAB_COMPLETION_ACTIVE" == "true" ]]; then
+    # Check if we should exit TAB completion mode
+    local from_completion=false
+    if [[ "$LASTWIDGET" == "_completion_on_demand" || \
+          "$LASTWIDGET" == "expand-or-complete" || \
+          "$LASTWIDGET" == "complete-word" || \
+          "$LASTWIDGET" == "menu-complete" || \
+          "$LASTWIDGET" == "reverse-menu-complete" ]]; then
+      from_completion=true
+    fi
+
+    # Exit TAB mode only when user types a non-space character
+    if [[ "$from_completion" != "true" && "${BUFFER: -1}" != " " ]]; then
+      _TAB_COMPLETION_ACTIVE=false
+    else
+      # Still in TAB completion mode - don't touch the display
+      return
+    fi
+  fi
 
   # Clear previous suggestion
   _AUTOSUGGEST_SUGGESTION=""
@@ -553,6 +585,80 @@ _autosuggest_modify() {
         region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
       fi
     fi
+
+    # Show dropdown menu with matches (always visible while typing)
+    _autosuggest_show_dropdown
+  else
+    # Buffer is empty - clear dropdown state (unless in explicit CTRL+R mode)
+    if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
+      _MENU_SEARCH_ACTIVE=false
+      _MENU_SEARCH_QUERY=""
+      _MENU_MATCHES_CONTEXTUAL=()
+      _MENU_MATCHES_GLOBAL=()
+      _MENU_SELECTED_INDEX=0
+      _MENU_DROPDOWN_ENTERED=false
+      zle -M ""
+    fi
+  fi
+}
+
+# Show dropdown menu with history matches while typing
+_autosuggest_show_dropdown() {
+  # Don't interfere if already in explicit menu mode (CTRL+R was pressed)
+  if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+    return
+  fi
+
+  # Don't show dropdown during TAB completion
+  if [[ "$_TAB_COMPLETION_ACTIVE" == "true" ]]; then
+    return
+  fi
+
+  # Use 5 items for auto-dropdown
+  _MENU_MAX_DISPLAY=5
+
+  # Check if buffer changed while in dropdown (user typed something)
+  if [[ "$_MENU_DROPDOWN_ENTERED" == "true" && "$BUFFER" != "$_MENU_SEARCH_QUERY" ]]; then
+    # Exit dropdown mode since query changed
+    _MENU_SEARCH_ACTIVE=false
+    _MENU_DROPDOWN_ENTERED=false
+    _MENU_SELECTED_INDEX=0
+  fi
+
+  # If user has entered dropdown and query unchanged, just re-render (keep selection)
+  if [[ "$_MENU_DROPDOWN_ENTERED" == "true" ]]; then
+    _menu_render
+    return
+  fi
+
+  # Only update matches if query changed
+  if [[ "$BUFFER" != "$_MENU_SEARCH_QUERY" ]]; then
+    _MENU_SEARCH_QUERY="$BUFFER"
+    _MENU_SELECTED_INDEX=0
+    _MENU_DISPLAY_OFFSET=0
+    # Only get contextual matches for auto-dropdown (no global fallback)
+    _MENU_MATCHES_CONTEXTUAL=()
+    _MENU_MATCHES_GLOBAL=()
+    local matches_output
+    matches_output=$(_menu_get_contextual_substring_matches "$BUFFER")
+    if [[ -n "$matches_output" ]]; then
+      local line
+      while IFS= read -r line; do
+        _MENU_MATCHES_CONTEXTUAL+=("$line")
+      done <<< "$matches_output"
+    fi
+
+    # Remove first match from dropdown (already shown as grey auto-suggestion)
+    if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+      _MENU_MATCHES_CONTEXTUAL=("${_MENU_MATCHES_CONTEXTUAL[@]:1}")
+    fi
+  fi
+
+  # Only render if we have matches after removing the first (which is shown as grey auto-suggestion)
+  if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+    _menu_render
+  else
+    zle -M ""
   fi
 }
 
@@ -602,10 +708,12 @@ _history_cycle_reset() {
 # Reset menu search state
 _menu_search_reset() {
   _MENU_SEARCH_ACTIVE=false
+  _MENU_EXPLICIT_MODE=false
   _MENU_SEARCH_QUERY=""
   _MENU_MATCHES_CONTEXTUAL=()
   _MENU_MATCHES_GLOBAL=()
-  _MENU_SELECTED_INDEX=1
+  _MENU_SELECTED_INDEX=0
+  _MENU_DROPDOWN_ENTERED=false
   _MENU_DISPLAY_OFFSET=0
   _MENU_ORIGINAL_BUFFER=""
 
@@ -661,9 +769,14 @@ _menu_render() {
   local total_contextual=${#_MENU_MATCHES_CONTEXTUAL[@]}
   local total_global=${#_MENU_MATCHES_GLOBAL[@]}
 
-  # If no matches at all, show "no matches" message
+  # If no matches at all
   if (( total_contextual == 0 && total_global == 0 )); then
-    zle -M "No history matches found"
+    # In explicit CTRL+R mode, show message; in auto mode, just clear
+    if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+      zle -M "No history matches found"
+    else
+      zle -M ""
+    fi
     return
   fi
 
@@ -698,9 +811,9 @@ _menu_render() {
     # Stop if past visible window
     (( current_idx > visible_end )) && break
 
-    # Highlight selected item
+    # Highlight selected item (only if dropdown entered and item selected)
     local truncated_cmd=$(_menu_truncate_command "$cmd" "$cmd_width")
-    if (( current_idx == _MENU_SELECTED_INDEX )); then
+    if [[ "$_MENU_DROPDOWN_ENTERED" == "true" ]] && (( current_idx == _MENU_SELECTED_INDEX )); then
       menu_lines+=("> ${truncated_cmd}")
     else
       menu_lines+=("  ${truncated_cmd}")
@@ -770,31 +883,44 @@ _menu_move_selection() {
 
 # Main entry point: Start menu search (CTRL+R)
 _menu_search_start() {
-  # If already in menu mode, move selection down (cycle through matches)
-  if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    _menu_move_selection 1
+  # If already in explicit menu mode, just refresh
+  if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
     return
   fi
 
-  # Enter menu search mode
+  # Enter explicit menu search mode (CTRL+R was pressed)
   _MENU_SEARCH_ACTIVE=true
+  _MENU_EXPLICIT_MODE=true
   _MENU_ORIGINAL_BUFFER="$BUFFER"
   _MENU_SEARCH_QUERY="$BUFFER"
 
-  # Get initial matches (if buffer is empty, gets last 12 contextual commands)
+  # Get initial matches (if buffer is empty, gets recent commands)
   _menu_update_matches "$BUFFER"
 
-  # Display menu
+  # Display menu (use larger display for explicit CTRL+R mode)
+  _MENU_MAX_DISPLAY=12
+
+  # On empty buffer, immediately enter dropdown with first item selected
+  if [[ -z "$BUFFER" ]]; then
+    _MENU_DROPDOWN_ENTERED=true
+    _MENU_SELECTED_INDEX=1
+  else
+    _MENU_DROPDOWN_ENTERED=false
+    _MENU_SELECTED_INDEX=0
+  fi
   _menu_update_display
 }
 
-# Hook to handle buffer changes in menu mode (typing, backspace, etc.)
+# Hook to handle buffer changes in explicit menu mode (CTRL+R)
 _menu_search_buffer_change() {
-  if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
+  # Only handle explicit CTRL+R mode here; auto-dropdown is handled in _autosuggest_modify
+  if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
     # Buffer changed - update query and matches
     if [[ "$BUFFER" != "$_MENU_SEARCH_QUERY" ]]; then
       _MENU_SEARCH_QUERY="$BUFFER"
-      _MENU_SELECTED_INDEX=1
+      # Reset dropdown state when user types (they need to press arrow down again)
+      _MENU_SELECTED_INDEX=0
+      _MENU_DROPDOWN_ENTERED=false
       _MENU_DISPLAY_OFFSET=0
       _menu_update_matches "$BUFFER"
       _menu_update_display
@@ -804,20 +930,64 @@ _menu_search_buffer_change() {
 
 # Handle up arrow in menu mode
 _menu_search_up() {
-  if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    _menu_move_selection -1
+  if [[ "$_MENU_DROPDOWN_ENTERED" == "true" ]]; then
+    # Dropdown was entered - navigate up
+    local total_matches=0
+    if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+      # Explicit CTRL+R mode: use contextual or global
+      if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+        total_matches=${#_MENU_MATCHES_CONTEXTUAL[@]}
+      elif (( ${#_MENU_MATCHES_GLOBAL[@]} > 0 )); then
+        total_matches=${#_MENU_MATCHES_GLOBAL[@]}
+      fi
+    else
+      # Auto-dropdown mode: only contextual matches
+      total_matches=${#_MENU_MATCHES_CONTEXTUAL[@]}
+    fi
+    (( _MENU_SELECTED_INDEX-- ))
+    (( _MENU_SELECTED_INDEX < 1 )) && _MENU_SELECTED_INDEX=$total_matches
+    # Render menu and redraw prompt
+    _menu_render
+    zle -R
   else
-    # Not in menu mode - use original up arrow behavior
+    # Dropdown not entered - use original up arrow behavior (accept suggestion)
     zle autosuggest-up-or-history
   fi
 }
 
 # Handle down arrow in menu mode
 _menu_search_down() {
-  if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    _menu_move_selection 1
+  # Determine total matches based on mode
+  local total_matches=0
+  if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+    # Explicit CTRL+R mode: use contextual or global
+    if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+      total_matches=${#_MENU_MATCHES_CONTEXTUAL[@]}
+    elif (( ${#_MENU_MATCHES_GLOBAL[@]} > 0 )); then
+      total_matches=${#_MENU_MATCHES_GLOBAL[@]}
+    fi
   else
-    # Not in menu mode - use custom down arrow behavior
+    # Auto-dropdown mode: only contextual matches
+    total_matches=${#_MENU_MATCHES_CONTEXTUAL[@]}
+  fi
+
+  # If we have matches, handle dropdown navigation (allow empty buffer in explicit CTRL+R mode)
+  if (( total_matches > 0 )) && [[ -n "$BUFFER" || "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+    if [[ "$_MENU_DROPDOWN_ENTERED" != "true" ]]; then
+      # First arrow down: enter dropdown and select first item
+      _MENU_SEARCH_ACTIVE=true
+      _MENU_DROPDOWN_ENTERED=true
+      _MENU_SELECTED_INDEX=1
+    else
+      # Already in dropdown: move to next item
+      (( _MENU_SELECTED_INDEX++ ))
+      (( _MENU_SELECTED_INDEX > total_matches )) && _MENU_SELECTED_INDEX=1
+    fi
+    # Render menu and redraw prompt
+    _menu_render
+    zle -R
+  else
+    # No matches or empty buffer - use standard down arrow behavior
     zle autosuggest-down-or-history
   fi
 }
@@ -827,45 +997,62 @@ _autosuggest_clear_on_finish() {
   _AUTOSUGGEST_SUGGESTION=""
   POSTDISPLAY=""
   region_highlight=()
+
+  # Clear menu state (menu display clears automatically on new prompt)
+  _MENU_SEARCH_ACTIVE=false
+  _MENU_EXPLICIT_MODE=false
+  _MENU_SEARCH_QUERY=""
+  _MENU_MATCHES_CONTEXTUAL=()
+  _MENU_MATCHES_GLOBAL=()
+  _MENU_SELECTED_INDEX=0
+  _MENU_DROPDOWN_ENTERED=false
+  _MENU_MAX_DISPLAY=5
 }
 
 # Handle Enter in menu mode
 _menu_search_accept() {
   if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    # Get the selected command from the appropriate array (contextual or global)
     local selected_cmd=""
-    if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
-      selected_cmd="${_MENU_MATCHES_CONTEXTUAL[$_MENU_SELECTED_INDEX]}"
-    else
-      selected_cmd="${_MENU_MATCHES_GLOBAL[$_MENU_SELECTED_INDEX]}"
+
+    # Only get selected command if dropdown was entered
+    if [[ "$_MENU_DROPDOWN_ENTERED" == "true" && $_MENU_SELECTED_INDEX -gt 0 ]]; then
+      if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+        selected_cmd="${_MENU_MATCHES_CONTEXTUAL[$_MENU_SELECTED_INDEX]}"
+      else
+        selected_cmd="${_MENU_MATCHES_GLOBAL[$_MENU_SELECTED_INDEX]}"
+      fi
     fi
 
-    # CRITICAL: Set this to false BEFORE modifying BUFFER
+    # CRITICAL: Set these to false BEFORE modifying BUFFER
     # This prevents the line-pre-redraw hook from interfering
     _MENU_SEARCH_ACTIVE=false
+    _MENU_EXPLICIT_MODE=false
 
     # Clean up menu state first
     _MENU_SEARCH_QUERY=""
     _MENU_MATCHES_CONTEXTUAL=()
     _MENU_MATCHES_GLOBAL=()
-    _MENU_SELECTED_INDEX=1
+    _MENU_SELECTED_INDEX=0
+    _MENU_DROPDOWN_ENTERED=false
     _MENU_DISPLAY_OFFSET=0
     _MENU_ORIGINAL_BUFFER=""
+    _MENU_MAX_DISPLAY=5
 
     # Clear the menu display
     zle -M ""
 
-    # NOW set buffer to selected command (after everything is cleaned up)
+    # If dropdown was entered and we have a selection, use it
     if [[ -n "$selected_cmd" ]]; then
       BUFFER="$selected_cmd"
       CURSOR=${#BUFFER}
+      # Force a complete redraw to show the selected command
+      zle -R
+      return 0
+    else
+      # Dropdown not entered: execute the current buffer (typed command)
+      zle .accept-line
+      return 0
     fi
-
-    # Force a complete redraw to show the selected command
-    zle -R
-
-    # Return 0 to indicate success and prevent default Enter behavior
-    return 0
   else
     # Not in menu mode - just accept normally, the hook will clear suggestions
     zle .accept-line
@@ -874,10 +1061,11 @@ _menu_search_accept() {
 
 # Handle ESC/CTRL+G in menu mode (cancel)
 _menu_search_cancel() {
-  if [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
-    # CRITICAL: Set this to false FIRST, before any operations
+  if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
+    # CRITICAL: Set these to false FIRST, before any operations
     # This prevents the line-pre-redraw hook from re-rendering the menu
     _MENU_SEARCH_ACTIVE=false
+    _MENU_EXPLICIT_MODE=false
 
     # Save the original buffer before cleanup
     local saved_buffer="$_MENU_ORIGINAL_BUFFER"
@@ -886,9 +1074,11 @@ _menu_search_cancel() {
     _MENU_SEARCH_QUERY=""
     _MENU_MATCHES_CONTEXTUAL=()
     _MENU_MATCHES_GLOBAL=()
-    _MENU_SELECTED_INDEX=1
+    _MENU_SELECTED_INDEX=0
+    _MENU_DROPDOWN_ENTERED=false
     _MENU_DISPLAY_OFFSET=0
     _MENU_ORIGINAL_BUFFER=""
+    _MENU_MAX_DISPLAY=5
 
     # Restore the original buffer (what was there before entering menu mode)
     BUFFER="$saved_buffer"
@@ -904,6 +1094,17 @@ _menu_search_cancel() {
     zle -R
 
     # Return success to prevent any default key handling
+    return 0
+  elif [[ "$_MENU_SEARCH_ACTIVE" == "true" ]]; then
+    # Auto-dropdown mode - just clear it
+    _MENU_SEARCH_ACTIVE=false
+    _MENU_SEARCH_QUERY=""
+    _MENU_MATCHES_CONTEXTUAL=()
+    _MENU_MATCHES_GLOBAL=()
+    _MENU_SELECTED_INDEX=0
+    _MENU_DROPDOWN_ENTERED=false
+    zle -M ""
+    zle send-break
     return 0
   else
     # Not in menu mode - standard CTRL+C behavior
