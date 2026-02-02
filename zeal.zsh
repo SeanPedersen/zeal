@@ -27,6 +27,7 @@ _init_hooks() {
   zle -N down-line-or-beginning-search
 
   # Register all ZLE hooks
+  add-zle-hook-widget line-init _autosuggest_show_frequent
   add-zle-hook-widget line-pre-redraw _autosuggest_modify
   add-zle-hook-widget line-finish _autosuggest_clear_on_finish
   add-zle-hook-widget line-pre-redraw _history_cycle_check_reset
@@ -96,8 +97,11 @@ TRAPUSR2() {
     _CONTEXTUAL_HISTORY_LOADED=true
     _CONTEXTUAL_HISTORY_LOADING=false
 
-    # Refresh prompt to show it's ready
-    zle && zle reset-prompt 2>/dev/null
+    # Show frequent command and refresh prompt
+    if zle; then
+      zle autosuggest-show-frequent 2>/dev/null
+      zle reset-prompt 2>/dev/null
+    fi
   fi
 }
 
@@ -352,6 +356,30 @@ _search_global_history_substring() {
   return 1
 }
 
+# Get most frequent command in contextual history for current directory
+_get_most_frequent_contextual_command() {
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+
+  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+  [[ -z "$cmd_list" ]] && return 1
+
+  # Count frequencies using associative array
+  local -A freq
+  local line max_cmd="" max_count=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # Safely increment frequency count
+    (( freq[$line] = ${freq[$line]:-0} + 1 ))
+    if (( freq[$line] > max_count )); then
+      max_count=${freq[$line]}
+      max_cmd="$line"
+    fi
+  done <<< "$cmd_list"
+
+  [[ -n "$max_cmd" ]] && echo "$max_cmd" && return 0
+  return 1
+}
+
 # Get all contextual matches for cycling (used by arrow-up)
 _get_all_contextual_matches() {
   local buffer="$1"
@@ -552,6 +580,26 @@ sched +0 _load_compinit_now
 # Fish-style autosuggestions (lightweight native implementation)
 typeset -g _AUTOSUGGEST_SUGGESTION=""
 
+# Show most frequent command on fresh prompt (line-init hook)
+_autosuggest_show_frequent() {
+  # Only show if buffer is empty (fresh prompt)
+  [[ -n "$BUFFER" ]] && return
+
+  # Clear any previous autosuggest highlighting
+  region_highlight=("${(@)region_highlight:#*autosuggest*}")
+  POSTDISPLAY=""
+  _AUTOSUGGEST_SUGGESTION=""
+
+  local freq_cmd
+  freq_cmd=$(_get_most_frequent_contextual_command)
+  if [[ -n "$freq_cmd" ]]; then
+    _AUTOSUGGEST_SUGGESTION="$freq_cmd"
+    POSTDISPLAY="$freq_cmd"
+    # Highlight POSTDISPLAY in grey (starts at CURSOR position which is 0 for empty buffer)
+    region_highlight+=("0 ${#freq_cmd} fg=240,bold autosuggest")
+  fi
+}
+
 _autosuggest_modify() {
   emulate -L zsh
 
@@ -639,7 +687,7 @@ _autosuggest_modify() {
     # Show dropdown menu with matches (always visible while typing)
     _autosuggest_show_dropdown
   else
-    # Buffer is empty - clear dropdown state (unless in explicit CTRL+R mode)
+    # Buffer is empty - show most frequent contextual command as suggestion
     if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
       _MENU_SEARCH_ACTIVE=false
       _MENU_SEARCH_QUERY=""
@@ -648,6 +696,15 @@ _autosuggest_modify() {
       _MENU_SELECTED_INDEX=0
       _MENU_DROPDOWN_ENTERED=false
       zle -M ""
+
+      # Show most frequent command as grey suggestion
+      local freq_cmd
+      freq_cmd=$(_get_most_frequent_contextual_command)
+      if [[ -n "$freq_cmd" ]]; then
+        _AUTOSUGGEST_SUGGESTION="$freq_cmd"
+        POSTDISPLAY="$freq_cmd"
+        region_highlight+=("$CURSOR $(( CURSOR + ${#freq_cmd} )) fg=240,bold autosuggest")
+      fi
     fi
   fi
 }
@@ -736,9 +793,24 @@ _autosuggest_clear() {
   region_highlight=()
 }
 
+# Widget to show frequent command (can be called from signal handlers)
+_autosuggest_show_frequent_widget() {
+  [[ -n "$BUFFER" ]] && return
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return
+
+  local freq_cmd
+  freq_cmd=$(_get_most_frequent_contextual_command)
+  if [[ -n "$freq_cmd" ]]; then
+    _AUTOSUGGEST_SUGGESTION="$freq_cmd"
+    POSTDISPLAY="$freq_cmd"
+    region_highlight=("0 ${#freq_cmd} fg=240,bold autosuggest")
+  fi
+}
+
 # Create ZLE widgets
 zle -N autosuggest-accept _autosuggest_accept
 zle -N autosuggest-clear _autosuggest_clear
+zle -N autosuggest-show-frequent _autosuggest_show_frequent_widget
 
 # Reset history cycling state
 _history_cycle_reset() {
