@@ -70,6 +70,7 @@ typeset -ga _HISTORY_CYCLE_SESSION           # Cached session matches
 typeset -ga _HISTORY_CYCLE_CONTEXTUAL        # Cached contextual matches
 typeset -g _HISTORY_CYCLE_IN_PROGRESS=false  # Are we mid-cycle?
 typeset -g _HISTORY_CYCLE_PWD=""             # Directory where cycling started
+typeset -g _JUST_ACCEPTED_SUGGESTION=false   # Did we just accept an auto-suggestion?
 
 # CTRL+R visual menu search state
 typeset -g _MENU_SEARCH_ACTIVE=false          # Are we in menu search mode?
@@ -821,6 +822,7 @@ _history_cycle_reset() {
   _HISTORY_CYCLE_CONTEXTUAL=()
   _HISTORY_CYCLE_IN_PROGRESS=false
   _HISTORY_CYCLE_PWD=""
+  _JUST_ACCEPTED_SUGGESTION=false
 }
 
 # ============================================================================
@@ -1270,6 +1272,8 @@ _autosuggest_up_or_history() {
   # Step 1: Accept suggestion if present
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
     _autosuggest_accept
+    # Mark that we just accepted a suggestion, so next UP press cycles through session history
+    _JUST_ACCEPTED_SUGGESTION=true
     return
   fi
 
@@ -1281,9 +1285,11 @@ _autosuggest_up_or_history() {
     _HISTORY_CYCLE_PWD="$PWD"
 
     # Determine initial state based on buffer content
-    if [[ -z "$BUFFER" ]]; then
-      # Empty buffer: start with session history
+    # Special case: if we just accepted a suggestion, treat as empty buffer (cycle session history)
+    if [[ -z "$BUFFER" ]] || [[ "$_JUST_ACCEPTED_SUGGESTION" == "true" ]]; then
+      # Empty buffer OR just accepted suggestion: start with session history
       _HISTORY_CYCLE_STATE="session"
+      _JUST_ACCEPTED_SUGGESTION=false  # Reset the flag
 
       # Populate session matches (reverse order - newest first), including ALL commands
       _HISTORY_CYCLE_SESSION=()
