@@ -687,7 +687,7 @@ _autosuggest_modify() {
 
     # Show dropdown menu with matches (always visible while typing)
     _autosuggest_show_dropdown
-  else
+  elif [[ -z "$BUFFER" ]]; then
     # Buffer is empty - show most frequent contextual command as suggestion
     if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
       _MENU_SEARCH_ACTIVE=false
@@ -708,6 +708,7 @@ _autosuggest_modify() {
       fi
     fi
   fi
+  # Note: If buffer is non-empty but cursor not at end, no suggestion is shown (intentional)
 }
 
 # Show dropdown menu with history matches while typing
