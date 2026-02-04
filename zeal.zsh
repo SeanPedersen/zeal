@@ -1627,8 +1627,8 @@ precmd() {
         local -a args
         args=(${(z)_LAST_COMMAND})
 
-        # Check every argument to see if it's a relative path that exists
-        # Use cheap string checks first to filter out obvious non-paths
+        # Check every argument to see if it's a relative path
+        # Use pattern matching (not file existence) to avoid issues with mv/rm changing filesystem
         for arg in "${args[@]:1}"; do
           # Skip flags (start with -)
           [[ "$arg" == "-"* ]] && continue
@@ -1642,13 +1642,25 @@ precmd() {
           # Skip pure numbers (ports, PIDs, counts, etc.)
           [[ "$arg" =~ ^[0-9]+$ ]] && continue
 
+          # "." and ".." are relative path references
+          if [[ "$arg" == "." || "$arg" == ".." ]]; then
+            should_add_to_global=false
+            break
+          fi
+
           # Skip very short strings (likely options like -v, -d, single chars)
           (( ${#arg} < 2 )) && continue
 
-          # Now check if this argument exists as a file or directory (relative path)
-          # This catches all cases: cd Desktop, vim file.txt, cat ../foo, open ./bar, etc.
+          # If it contains a slash, it's a relative path (absolute paths filtered above)
+          # This catches: cd foo/bar, mv v5/file.txt ., cat ../foo, open ./bar
+          if [[ "$arg" == *"/"* ]]; then
+            should_add_to_global=false
+            break
+          fi
+
+          # For simple filenames without slash, check if file exists
+          # This catches: vim file.txt, cat README, cd Desktop
           if ( cd "$_LAST_COMMAND_PWD" 2>/dev/null && [[ -e "$arg" ]] ); then
-            # It's a relative path that exists - exclude from global history
             should_add_to_global=false
             break
           fi
