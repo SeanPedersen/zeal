@@ -47,6 +47,7 @@ sched +0 _init_hooks
 
 # Global state for contextual history
 typeset -gA _CONTEXTUAL_HISTORY              # dir -> "cmd1\ncmd2\ncmd3" (newest first)
+typeset -gA _CONTEXTUAL_HISTORY_MOST_FREQUENT # dir -> most frequent command (cached)
 typeset -g _CONTEXTUAL_HISTORY_FILE="$HOME/.zsh_history_contextual"
 typeset -g _CONTEXTUAL_HISTORY_LOADED=false
 typeset -g _CONTEXTUAL_HISTORY_LOADING=false
@@ -92,6 +93,8 @@ TRAPUSR2() {
 
   # Source the cached data file
   if [[ -f "$cache_file" ]]; then
+    local cache_size=$(wc -c < "$cache_file" 2>/dev/null)
+    local cache_lines=$(wc -l < "$cache_file" 2>/dev/null)
     source "$cache_file" 2>/dev/null
     command rm -f "$cache_file" # Prevent alias interference
 
@@ -140,6 +143,14 @@ _load_contextual_history_async() {
         temp_history[$dir]="${cmd}"
       fi
     done < <(tail -10000 "$_CONTEXTUAL_HISTORY_FILE" 2>/dev/null)
+
+    # Limit each directory to 100 newest entries (list is already newest-first)
+    for dir in "${(@k)temp_history}"; do
+      local cmd_count=$(echo "${temp_history[$dir]}" | wc -l)
+      if (( cmd_count > 100 )); then
+        temp_history[$dir]=$(echo "${temp_history[$dir]}" | head -100)
+      fi
+    done
 
     # Write to cache file that parent will source
     local cache_file="/tmp/zsh_ctx_hist_${parent_pid}"
@@ -225,6 +236,9 @@ _store_contextual_history() {
       if (( cmd_count > 100 )); then
         _CONTEXTUAL_HISTORY[$cmd_pwd]=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | head -100)
       fi
+
+      # Recalculate most frequent command for this directory
+      _recalc_most_frequent_for_dir "$cmd_pwd"
     fi
 
     # Periodic cleanup of file (every ~1000 commands)
@@ -357,28 +371,45 @@ _search_global_history_substring() {
   return 1
 }
 
-# Get most frequent command in contextual history for current directory
+
+# Ensure cache is populated for current directory (call BEFORE using cache in subshell)
+_ensure_most_frequent_cached() {
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+  [[ -n "${_CONTEXTUAL_HISTORY_MOST_FREQUENT[$PWD]}" ]] && return 0
+  _recalc_most_frequent_for_dir "$PWD"
+}
+
+# Get most frequent command (MUST call _ensure_most_frequent_cached first in parent shell!)
 _get_most_frequent_contextual_command() {
   [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+  local cached="${_CONTEXTUAL_HISTORY_MOST_FREQUENT[$PWD]}"
+  [[ -n "$cached" ]] && echo "$cached" && return 0
+  return 1
+}
 
-  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+# Recalculate most frequent command for a specific directory (called on command addition)
+_recalc_most_frequent_for_dir() {
+  local dir="$1"
+
+  local cmd_list="${_CONTEXTUAL_HISTORY[$dir]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Count frequencies using associative array
-  local -A freq
-  local line max_cmd="" max_count=0
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    # Safely increment frequency count
-    (( freq[$line] = ${freq[$line]:-0} + 1 ))
-    if (( freq[$line] > max_count )); then
-      max_count=${freq[$line]}
-      max_cmd="$line"
-    fi
-  done <<< "$cmd_list"
+  # Split into array using parameter expansion (much faster than here-string)
+  local -a cmds=("${(@f)cmd_list}")
 
-  [[ -n "$max_cmd" ]] && echo "$max_cmd" && return 0
-  return 1
+  # Count frequencies using associative array (limit to first 100 for performance)
+  local -A freq
+  local cmd max_cmd="" max_count=0
+  for cmd in "${cmds[@]:0:100}"; do
+    [[ -z "$cmd" ]] && continue
+    (( freq[$cmd] = ${freq[$cmd]:-0} + 1 ))
+    if (( freq[$cmd] > max_count )); then
+      max_count=${freq[$cmd]}
+      max_cmd="$cmd"
+    fi
+  done
+
+  [[ -n "$max_cmd" ]] && _CONTEXTUAL_HISTORY_MOST_FREQUENT[$dir]="$max_cmd"
 }
 
 # Get all contextual matches for cycling (used by arrow-up)
@@ -583,6 +614,7 @@ typeset -g _AUTOSUGGEST_SUGGESTION=""
 
 # Show most frequent command on fresh prompt (line-init hook)
 _autosuggest_show_frequent() {
+
   # Only show if buffer is empty (fresh prompt)
   [[ -n "$BUFFER" ]] && return
 
@@ -591,6 +623,7 @@ _autosuggest_show_frequent() {
   POSTDISPLAY=""
   _AUTOSUGGEST_SUGGESTION=""
 
+  _ensure_most_frequent_cached
   local freq_cmd
   freq_cmd=$(_get_most_frequent_contextual_command)
   if [[ -n "$freq_cmd" ]]; then
@@ -599,6 +632,7 @@ _autosuggest_show_frequent() {
     # Highlight POSTDISPLAY in grey (starts at CURSOR position which is 0 for empty buffer)
     region_highlight+=("0 ${#freq_cmd} fg=240,bold autosuggest")
   fi
+
 }
 
 _autosuggest_modify() {
@@ -699,6 +733,7 @@ _autosuggest_modify() {
       zle -M ""
 
       # Show most frequent command as grey suggestion
+      _ensure_most_frequent_cached
       local freq_cmd
       freq_cmd=$(_get_most_frequent_contextual_command)
       if [[ -n "$freq_cmd" ]]; then
@@ -800,6 +835,7 @@ _autosuggest_show_frequent_widget() {
   [[ -n "$BUFFER" ]] && return
   [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return
 
+  _ensure_most_frequent_cached
   local freq_cmd
   freq_cmd=$(_get_most_frequent_contextual_command)
   if [[ -n "$freq_cmd" ]]; then
@@ -1725,6 +1761,7 @@ precmd() {
 
   # Disable CTRL+C interrupt character so ZLE can handle it
   stty intr undef
+
 }
 
 # ----------------------------------------------------------------------------
@@ -1797,6 +1834,7 @@ typeset -g _VCS_INFO_REGENERATED_THIS_CYCLE=false
 
 # Check git HEAD once per prompt cycle
 precmd_check_git_head() {
+
   # Guard: only run once per prompt cycle
   if [[ "$_VCS_INFO_CURRENT_HEAD_CHECKED" == "true" ]]; then
     return
@@ -1941,10 +1979,12 @@ POWERLINE_SEPARATOR=$'\uE0B0'  #
 
 # Prompt segments
 prompt_status() {
+  local result=""
   # Show red X if last command failed
   if [[ $cmd_exit_code -ne 0 ]]; then
-    echo "%F{red}✗ %f"
+    result="%F{red}✗ %f"
   fi
+  echo "$result"
 }
 
 prompt_user() {
@@ -1988,17 +2028,20 @@ _shorten_path() {
 
 prompt_dir() {
   # Don't add separator here - let git segment handle it
-  echo "%K{blue}%F{black} $(_shorten_path) %k%f"
+  local result="%K{blue}%F{black} $(_shorten_path) %k%f"
+  echo "$result"
 }
 
 prompt_git() {
+  local result
   if [[ -n ${vcs_info_msg_0_} ]]; then
     # Blue triangle on green background for transition, then git info, then green triangle
-    echo "%K{green}%F{blue}${POWERLINE_SEPARATOR}%f%F{black}${vcs_info_msg_0_} %k%f%F{green}${POWERLINE_SEPARATOR}%f"
+    result="%K{green}%F{blue}${POWERLINE_SEPARATOR}%f%F{black}${vcs_info_msg_0_} %k%f%F{green}${POWERLINE_SEPARATOR}%f"
   else
     # No git branch - just blue triangle
-    echo "%F{blue}${POWERLINE_SEPARATOR}%f"
+    result="%F{blue}${POWERLINE_SEPARATOR}%f"
   fi
+  echo "$result"
 }
 
 # Build prompt
