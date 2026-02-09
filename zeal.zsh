@@ -399,12 +399,14 @@ _recalc_most_frequent_for_dir() {
 
   # Count frequencies using associative array (limit to first 100 for performance)
   local -A freq
-  local cmd max_cmd="" max_count=0
+  local cmd max_cmd="" max_count=0 count
   for cmd in "${cmds[@]:0:100}"; do
     [[ -z "$cmd" ]] && continue
-    (( freq[$cmd] = ${freq[$cmd]:-0} + 1 ))
-    if (( freq[$cmd] > max_count )); then
-      max_count=${freq[$cmd]}
+    # Use (e) flag for exact matching to handle special characters in commands
+    count=$(( ${freq[(e)$cmd]:-0} + 1 ))
+    freq[(e)$cmd]=$count
+    if (( count > max_count )); then
+      max_count=$count
       max_cmd="$cmd"
     fi
   done
