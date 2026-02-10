@@ -29,3 +29,8 @@ https://github.com/user-attachments/assets/a89d975d-e0e7-4bf8-b050-e73b2621d48f
 
 ## Structure
 - Contextual (cwd + command) history is stored in ~/.zsh_history_contextual
+
+## References
+
+- [ZSH Theme Benchmark](https://github.com/romkatv/zsh-bench/?tab=readme-ov-file#prompt)
+- <https://github.com/romkatv/powerlevel10k>
