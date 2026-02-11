@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/a89d975d-e0e7-4bf8-b050-e73b2621d48f
 
 ## Shortcuts
 - TAB to autocomplete existing paths in CWD
-- ARROW UP to autocomplete with current grey auto-suggestion (based on CWD + shell history)
+- ARROW RIGHT to autocomplete with current grey auto-suggestion (based on CWD + shell history)
 
 ## Structure
 - Contextual (cwd + command) history is stored in ~/.zsh_history_contextual

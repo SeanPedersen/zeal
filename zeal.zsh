@@ -63,7 +63,7 @@ _CONTEXTUAL_HISTORY_GLOBAL_WHITELIST=(
 typeset -ga _SESSION_HISTORY_COMMANDS
 typeset -g _SESSION_HISTORY_MAX=1000
 
-# State for arrow-up cycling through session -> contextual -> global history
+# State for arrow-up/down cycling through session -> contextual -> global history
 typeset -g _HISTORY_CYCLE_STATE=""           # "session", "contextual", or "global"
 typeset -g _HISTORY_CYCLE_INDEX=0            # Current position in list
 typeset -g _HISTORY_CYCLE_BUFFER=""          # What user originally typed
@@ -71,7 +71,6 @@ typeset -ga _HISTORY_CYCLE_SESSION           # Cached session matches
 typeset -ga _HISTORY_CYCLE_CONTEXTUAL        # Cached contextual matches
 typeset -g _HISTORY_CYCLE_IN_PROGRESS=false  # Are we mid-cycle?
 typeset -g _HISTORY_CYCLE_PWD=""             # Directory where cycling started
-typeset -g _JUST_ACCEPTED_SUGGESTION=false   # Did we just accept an auto-suggestion?
 
 # CTRL+R visual menu search state
 typeset -g _MENU_SEARCH_ACTIVE=false          # Are we in menu search mode?
@@ -640,6 +639,39 @@ _autosuggest_show_frequent() {
 _autosuggest_modify() {
   emulate -L zsh
 
+  # Check if history cycling should be reset (must run BEFORE suppression check,
+  # since _history_cycle_check_reset hook fires after this one)
+  if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
+    local _cycle_current=""
+    if [[ "$_HISTORY_CYCLE_STATE" == "session" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
+      _cycle_current="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
+    elif [[ "$_HISTORY_CYCLE_STATE" == "contextual" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
+      _cycle_current="${_HISTORY_CYCLE_CONTEXTUAL[$_HISTORY_CYCLE_INDEX]}"
+    fi
+
+    local _should_reset=false
+    if [[ -z "$_HISTORY_CYCLE_BUFFER" ]]; then
+      # Cycling started with empty buffer: reset if user typed or cleared back to empty
+      [[ "$BUFFER" != "$_cycle_current" ]] && _should_reset=true
+    else
+      # Cycling started with non-empty buffer: reset if buffer diverged
+      [[ "$BUFFER" != "$_HISTORY_CYCLE_BUFFER"* && "$BUFFER" != "$_cycle_current" ]] && _should_reset=true
+    fi
+
+    [[ "$_should_reset" == "true" ]] && _history_cycle_reset
+  fi
+
+  # During history cycling, suppress autosuggestions to avoid visual confusion
+  if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
+    _AUTOSUGGEST_SUGGESTION=""
+    region_highlight=("${(@)region_highlight:#*autosuggest*}")
+    POSTDISPLAY=""
+    if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
+      zle -M ""
+    fi
+    return
+  fi
+
   # During TAB completion, don't modify display at all to avoid interference
   if [[ "$_TAB_COMPLETION_ACTIVE" == "true" ]]; then
     # Check if we should exit TAB completion mode
@@ -826,6 +858,15 @@ _autosuggest_accept() {
   fi
 }
 
+# Accept suggestion if present, otherwise move cursor forward (for arrow right)
+_autosuggest_accept_or_forward_char() {
+  if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
+    _autosuggest_accept
+  else
+    zle forward-char
+  fi
+}
+
 _autosuggest_clear() {
   _AUTOSUGGEST_SUGGESTION=""
   POSTDISPLAY=""
@@ -849,6 +890,7 @@ _autosuggest_show_frequent_widget() {
 
 # Create ZLE widgets
 zle -N autosuggest-accept _autosuggest_accept
+zle -N autosuggest-accept-or-forward-char _autosuggest_accept_or_forward_char
 zle -N autosuggest-clear _autosuggest_clear
 zle -N autosuggest-show-frequent _autosuggest_show_frequent_widget
 
@@ -861,7 +903,6 @@ _history_cycle_reset() {
   _HISTORY_CYCLE_CONTEXTUAL=()
   _HISTORY_CYCLE_IN_PROGRESS=false
   _HISTORY_CYCLE_PWD=""
-  _JUST_ACCEPTED_SUGGESTION=false
 }
 
 # ============================================================================
@@ -1113,7 +1154,7 @@ _menu_search_up() {
     _menu_render
     zle -R
   else
-    # Dropdown not entered - use original up arrow behavior (accept suggestion)
+    # Dropdown not entered - cycle through history
     zle autosuggest-up-or-history
   fi
 }
@@ -1308,15 +1349,12 @@ _history_cycle_check_reset() {
 
 # Custom up-arrow: session history first (if empty buffer), then contextual, then global
 _autosuggest_up_or_history() {
-  # Step 1: Accept suggestion if present
+  # Clear any visible suggestion so it doesn't interfere with history cycling
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
-    _autosuggest_accept
-    # Mark that we just accepted a suggestion, so next UP press cycles through session history
-    _JUST_ACCEPTED_SUGGESTION=true
-    return
+    _autosuggest_clear
   fi
 
-  # Step 2: Initialize cycling if not in progress OR directory changed
+  # Step 1: Initialize cycling if not in progress OR directory changed
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" != "true" ]] || [[ "$_HISTORY_CYCLE_PWD" != "$PWD" ]]; then
     _HISTORY_CYCLE_BUFFER="$BUFFER"
     _HISTORY_CYCLE_INDEX=0
@@ -1324,11 +1362,9 @@ _autosuggest_up_or_history() {
     _HISTORY_CYCLE_PWD="$PWD"
 
     # Determine initial state based on buffer content
-    # Special case: if we just accepted a suggestion, treat as empty buffer (cycle session history)
-    if [[ -z "$BUFFER" ]] || [[ "$_JUST_ACCEPTED_SUGGESTION" == "true" ]]; then
-      # Empty buffer OR just accepted suggestion: start with session history
+    if [[ -z "$BUFFER" ]]; then
+      # Empty buffer: start with session history
       _HISTORY_CYCLE_STATE="session"
-      _JUST_ACCEPTED_SUGGESTION=false  # Reset the flag
 
       # Populate session matches (reverse order - newest first), including ALL commands
       _HISTORY_CYCLE_SESSION=()
@@ -1491,8 +1527,8 @@ bindkey '^[[A' menu-search-up                 # Up arrow: menu navigation or his
 bindkey '^[OA' menu-search-up                 # Up arrow (application mode)
 bindkey '^[[B' menu-search-down               # Down arrow: menu navigation or history
 bindkey '^[OB' menu-search-down               # Down arrow (application mode)
-bindkey '^[[C' forward-char                   # Right arrow: moves cursor forward
-bindkey '^[OC' forward-char                   # Right arrow (application mode)
+bindkey '^[[C' autosuggest-accept-or-forward-char  # Right arrow: accept suggestion or move cursor
+bindkey '^[OC' autosuggest-accept-or-forward-char  # Right arrow (application mode)
 
 # Disable terminal interrupt character by default so ZLE can handle CTRL+C
 # This will be re-enabled in preexec() before commands run, and disabled again in precmd()
