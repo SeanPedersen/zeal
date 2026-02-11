@@ -63,14 +63,11 @@ _CONTEXTUAL_HISTORY_GLOBAL_WHITELIST=(
 typeset -ga _SESSION_HISTORY_COMMANDS
 typeset -g _SESSION_HISTORY_MAX=1000
 
-# State for arrow-up/down cycling through session -> contextual -> global history
-typeset -g _HISTORY_CYCLE_STATE=""           # "session", "contextual", or "global"
+# State for arrow-up/down cycling through session history
 typeset -g _HISTORY_CYCLE_INDEX=0            # Current position in list
 typeset -g _HISTORY_CYCLE_BUFFER=""          # What user originally typed
-typeset -ga _HISTORY_CYCLE_SESSION           # Cached session matches
-typeset -ga _HISTORY_CYCLE_CONTEXTUAL        # Cached contextual matches
+typeset -ga _HISTORY_CYCLE_SESSION           # Cached session matches (filtered by prefix)
 typeset -g _HISTORY_CYCLE_IN_PROGRESS=false  # Are we mid-cycle?
-typeset -g _HISTORY_CYCLE_PWD=""             # Directory where cycling started
 
 # CTRL+R visual menu search state
 typeset -g _MENU_SEARCH_ACTIVE=false          # Are we in menu search mode?
@@ -639,26 +636,16 @@ _autosuggest_show_frequent() {
 _autosuggest_modify() {
   emulate -L zsh
 
-  # Check if history cycling should be reset (must run BEFORE suppression check,
-  # since _history_cycle_check_reset hook fires after this one)
+  # Check if history cycling should be reset (user typed something)
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
     local _cycle_current=""
-    if [[ "$_HISTORY_CYCLE_STATE" == "session" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
+    if (( _HISTORY_CYCLE_INDEX > 0 )); then
       _cycle_current="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
-    elif [[ "$_HISTORY_CYCLE_STATE" == "contextual" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
-      _cycle_current="${_HISTORY_CYCLE_CONTEXTUAL[$_HISTORY_CYCLE_INDEX]}"
     fi
-
-    local _should_reset=false
-    if [[ -z "$_HISTORY_CYCLE_BUFFER" ]]; then
-      # Cycling started with empty buffer: reset if user typed or cleared back to empty
-      [[ "$BUFFER" != "$_cycle_current" ]] && _should_reset=true
-    else
-      # Cycling started with non-empty buffer: reset if buffer diverged
-      [[ "$BUFFER" != "$_HISTORY_CYCLE_BUFFER"* && "$BUFFER" != "$_cycle_current" ]] && _should_reset=true
+    # Reset if buffer doesn't match current cycling position
+    if [[ "$BUFFER" != "$_cycle_current" ]]; then
+      _history_cycle_reset
     fi
-
-    [[ "$_should_reset" == "true" ]] && _history_cycle_reset
   fi
 
   # During history cycling, suppress autosuggestions to avoid visual confusion
@@ -896,13 +883,10 @@ zle -N autosuggest-show-frequent _autosuggest_show_frequent_widget
 
 # Reset history cycling state
 _history_cycle_reset() {
-  _HISTORY_CYCLE_STATE=""
   _HISTORY_CYCLE_INDEX=0
   _HISTORY_CYCLE_BUFFER=""
   _HISTORY_CYCLE_SESSION=()
-  _HISTORY_CYCLE_CONTEXTUAL=()
   _HISTORY_CYCLE_IN_PROGRESS=false
-  _HISTORY_CYCLE_PWD=""
 }
 
 # ============================================================================
@@ -1333,175 +1317,74 @@ _menu_search_interrupt() {
 # Hook to reset cycle on buffer modification
 _history_cycle_check_reset() {
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
-    # If buffer changed from what we were cycling, reset
     local current_displayed=""
-    if [[ "$_HISTORY_CYCLE_STATE" == "session" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
+    if (( _HISTORY_CYCLE_INDEX > 0 )); then
       current_displayed="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
-    elif [[ "$_HISTORY_CYCLE_STATE" == "contextual" && $_HISTORY_CYCLE_INDEX -gt 0 ]]; then
-      current_displayed="${_HISTORY_CYCLE_CONTEXTUAL[$_HISTORY_CYCLE_INDEX]}"
     fi
-
-    if [[ "$BUFFER" != "$_HISTORY_CYCLE_BUFFER"* && "$BUFFER" != "$current_displayed" ]]; then
+    # Reset if user modified the buffer
+    if [[ "$BUFFER" != "$current_displayed" ]]; then
       _history_cycle_reset
     fi
   fi
 }
 
-# Custom up-arrow: session history first (if empty buffer), then contextual, then global
+# Custom up-arrow: cycles through session history (previous commands)
 _autosuggest_up_or_history() {
-  # Clear any visible suggestion so it doesn't interfere with history cycling
+  # Clear any visible suggestion
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
     _autosuggest_clear
   fi
 
-  # Step 1: Initialize cycling if not in progress OR directory changed
-  if [[ "$_HISTORY_CYCLE_IN_PROGRESS" != "true" ]] || [[ "$_HISTORY_CYCLE_PWD" != "$PWD" ]]; then
+  # Initialize cycling if not in progress
+  if [[ "$_HISTORY_CYCLE_IN_PROGRESS" != "true" ]]; then
     _HISTORY_CYCLE_BUFFER="$BUFFER"
     _HISTORY_CYCLE_INDEX=0
     _HISTORY_CYCLE_IN_PROGRESS=true
-    _HISTORY_CYCLE_PWD="$PWD"
 
-    # Determine initial state based on buffer content
-    if [[ -z "$BUFFER" ]]; then
-      # Empty buffer: start with session history
-      _HISTORY_CYCLE_STATE="session"
-
-      # Populate session matches (reverse order - newest first), including ALL commands
-      _HISTORY_CYCLE_SESSION=()
-      local -i i
-      for (( i=${#_SESSION_HISTORY_COMMANDS[@]}; i>0; i-- )); do
-        _HISTORY_CYCLE_SESSION+=("${_SESSION_HISTORY_COMMANDS[$i]}")
-      done
-    else
-      # Non-empty buffer: start with contextual history (prefix matching)
-      _HISTORY_CYCLE_STATE="contextual"
-    fi
-
-    # Get all contextual matches (for when we reach contextual state)
-    _HISTORY_CYCLE_CONTEXTUAL=()
-    local matches_output
-    matches_output=$(_get_all_contextual_matches "$BUFFER")
-
-    if [[ -n "$matches_output" ]]; then
-      # Split on newlines - use plain array expansion
-      local line
-      while IFS= read -r line; do
-        _HISTORY_CYCLE_CONTEXTUAL+=("$line")
-      done <<< "$matches_output"
-    fi
+    # Copy session history (reverse order - newest first)
+    _HISTORY_CYCLE_SESSION=()
+    local -i i
+    for (( i=${#_SESSION_HISTORY_COMMANDS[@]}; i>0; i-- )); do
+      _HISTORY_CYCLE_SESSION+=("${_SESSION_HISTORY_COMMANDS[$i]}")
+    done
   fi
 
-  # Step 3: Cycle through session history (only when buffer was empty at start)
-  if [[ "$_HISTORY_CYCLE_STATE" == "session" ]]; then
-    if (( ${#_HISTORY_CYCLE_SESSION[@]} > 0 && _HISTORY_CYCLE_INDEX < ${#_HISTORY_CYCLE_SESSION[@]} )); then
-      # Show next session match
-      BUFFER="${_HISTORY_CYCLE_SESSION[$((_HISTORY_CYCLE_INDEX + 1))]}"
-      CURSOR=${#BUFFER}
-      _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX + 1))
-      return
-    else
-      # Exhausted session matches, switch to contextual
-      _HISTORY_CYCLE_STATE="contextual"
-      _HISTORY_CYCLE_INDEX=0
-    fi
-  fi
-
-  # Step 4: Cycle through contextual history
-  if [[ "$_HISTORY_CYCLE_STATE" == "contextual" ]]; then
-    if (( ${#_HISTORY_CYCLE_CONTEXTUAL[@]} > 0 && _HISTORY_CYCLE_INDEX < ${#_HISTORY_CYCLE_CONTEXTUAL[@]} )); then
-      # Show next contextual match
-      BUFFER="${_HISTORY_CYCLE_CONTEXTUAL[$((_HISTORY_CYCLE_INDEX + 1))]}"
-      CURSOR=${#BUFFER}
-      _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX + 1))
-      return
-    else
-      # Exhausted contextual matches, switch to global
-      _HISTORY_CYCLE_STATE="global"
-      _HISTORY_CYCLE_INDEX=0
-    fi
-  fi
-
-  # Step 5: Cycle through global history
-  if [[ "$_HISTORY_CYCLE_STATE" == "global" ]]; then
-    # Use standard zsh history search
+  # Cycle through session history
+  if (( ${#_HISTORY_CYCLE_SESSION[@]} > 0 && _HISTORY_CYCLE_INDEX < ${#_HISTORY_CYCLE_SESSION[@]} )); then
+    BUFFER="${_HISTORY_CYCLE_SESSION[$((_HISTORY_CYCLE_INDEX + 1))]}"
+    CURSOR=${#BUFFER}
+    _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX + 1))
+  else
+    # Exhausted session, fall back to global history
     zle up-line-or-beginning-search
   fi
 }
 
 zle -N autosuggest-up-or-history _autosuggest_up_or_history
 
-# Custom down-arrow: reverse cycling through history
+# Custom down-arrow: reverse cycling through session history
 _autosuggest_down_or_history() {
-  # If not cycling, do nothing (or use standard down behavior)
+  # If not cycling, use standard down behavior
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" != "true" ]]; then
-    # Standard behavior - go forward in history or do nothing
     zle down-line-or-beginning-search
     return
   fi
 
-  # If we're at the start (original buffer), reset cycling
-  if (( _HISTORY_CYCLE_INDEX == 0 )); then
+  # Go back in session history
+  if (( _HISTORY_CYCLE_INDEX > 0 )); then
+    _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX - 1))
+    if (( _HISTORY_CYCLE_INDEX == 0 )); then
+      # Back to original buffer
+      BUFFER="$_HISTORY_CYCLE_BUFFER"
+    else
+      BUFFER="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
+    fi
+    CURSOR=${#BUFFER}
+  else
+    # Already at start, reset cycling
     BUFFER="$_HISTORY_CYCLE_BUFFER"
     CURSOR=${#BUFFER}
     _history_cycle_reset
-    return
-  fi
-
-  # Go backward through current state
-  if [[ "$_HISTORY_CYCLE_STATE" == "session" ]]; then
-    # Go back in session history
-    if (( _HISTORY_CYCLE_INDEX > 0 )); then
-      _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX - 1))
-      if (( _HISTORY_CYCLE_INDEX == 0 )); then
-        # Back to original buffer
-        BUFFER="$_HISTORY_CYCLE_BUFFER"
-      else
-        BUFFER="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
-      fi
-      CURSOR=${#BUFFER}
-      return
-    fi
-  elif [[ "$_HISTORY_CYCLE_STATE" == "contextual" ]]; then
-    # Go back in contextual history or back to session
-    if (( _HISTORY_CYCLE_INDEX > 0 )); then
-      _HISTORY_CYCLE_INDEX=$((_HISTORY_CYCLE_INDEX - 1))
-      if (( _HISTORY_CYCLE_INDEX == 0 )); then
-        # If we have session history and buffer was empty, go back to session
-        if [[ -z "$_HISTORY_CYCLE_BUFFER" && ${#_HISTORY_CYCLE_SESSION[@]} -gt 0 ]]; then
-          _HISTORY_CYCLE_STATE="session"
-          _HISTORY_CYCLE_INDEX=${#_HISTORY_CYCLE_SESSION[@]}
-          BUFFER="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
-        else
-          # Back to original buffer
-          BUFFER="$_HISTORY_CYCLE_BUFFER"
-        fi
-      else
-        BUFFER="${_HISTORY_CYCLE_CONTEXTUAL[$_HISTORY_CYCLE_INDEX]}"
-      fi
-      CURSOR=${#BUFFER}
-      return
-    fi
-  elif [[ "$_HISTORY_CYCLE_STATE" == "global" ]]; then
-    # Go back in global history or back to contextual
-    # For global, we need to transition back to contextual
-    if (( ${#_HISTORY_CYCLE_CONTEXTUAL[@]} > 0 )); then
-      _HISTORY_CYCLE_STATE="contextual"
-      _HISTORY_CYCLE_INDEX=${#_HISTORY_CYCLE_CONTEXTUAL[@]}
-      BUFFER="${_HISTORY_CYCLE_CONTEXTUAL[$_HISTORY_CYCLE_INDEX]}"
-      CURSOR=${#BUFFER}
-    elif (( ${#_HISTORY_CYCLE_SESSION[@]} > 0 && -z "$_HISTORY_CYCLE_BUFFER" )); then
-      # No contextual, but has session (and buffer was empty)
-      _HISTORY_CYCLE_STATE="session"
-      _HISTORY_CYCLE_INDEX=${#_HISTORY_CYCLE_SESSION[@]}
-      BUFFER="${_HISTORY_CYCLE_SESSION[$_HISTORY_CYCLE_INDEX]}"
-      CURSOR=${#BUFFER}
-    else
-      # Back to original buffer
-      BUFFER="$_HISTORY_CYCLE_BUFFER"
-      CURSOR=${#BUFFER}
-      _history_cycle_reset
-    fi
-    return
   fi
 }
 
