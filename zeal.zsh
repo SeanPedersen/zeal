@@ -1512,8 +1512,6 @@ zle -N cut-selection _cut_selection
 # Try multiple escape sequences for different terminals
 bindkey '^[[1;2C' select-char-forward         # SHIFT+→: select char forward
 bindkey '^[[1;2D' select-char-backward        # SHIFT+←: select char backward
-bindkey '^[OC' select-char-forward            # SHIFT+→ (alternate)
-bindkey '^[OD' select-char-backward           # SHIFT+← (alternate)
 
 bindkey '^[[1;6C' select-word-forward         # CTRL+SHIFT+→: select word forward
 bindkey '^[[1;6D' select-word-backward        # CTRL+SHIFT+←: select word backward
