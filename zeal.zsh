@@ -398,6 +398,73 @@ _search_global_history_substring() {
   return 1
 }
 
+# ----------------------------------------------------------------------------
+# Fuzzy Matching
+# ----------------------------------------------------------------------------
+
+# Fuzzy match: each char in pattern must appear in order in candidate (case-insensitive)
+_fuzzy_match() {
+  local pattern="${1:l}" candidate="${2:l}"
+  local -i pi=0 ci=0 plen=${#pattern} clen=${#candidate}
+
+  while (( pi < plen && ci < clen )); do
+    [[ "${pattern:$pi:1}" == "${candidate:$ci:1}" ]] && (( pi++ ))
+    (( ci++ ))
+  done
+
+  (( pi == plen ))
+}
+
+# Fuzzy search contextual history (fallback after prefix + substring)
+_search_contextual_history_fuzzy() {
+  local buffer="$1"
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+
+  local first_word="${buffer%% *}"
+  (( ${_CONTEXTUAL_HISTORY_GLOBAL_WHITELIST[(I)$first_word]} )) && return 1
+
+  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+  [[ -z "$cmd_list" ]] && return 1
+
+  local entry cmd
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+    [[ "$cmd" == "$buffer" ]] && continue
+    [[ "$cmd" == "$buffer"* || "$cmd" == *"$buffer"* ]] && continue
+    if _fuzzy_match "$buffer" "$cmd"; then
+      echo "$cmd"
+      return 0
+    fi
+  done <<< "$cmd_list"
+
+  return 1
+}
+
+# Fuzzy search global history (fallback after prefix + substring)
+_search_global_history_fuzzy() {
+  local buffer="$1"
+  local history_file="${HISTFILE:-$HOME/.zsh_history}"
+  [[ ! -f "$history_file" ]] && return 1
+
+  local line cmd
+  while IFS= read -r line; do
+    if [[ "$line" == ":"*";"* ]]; then
+      cmd="${line#*;}"
+    else
+      cmd="$line"
+    fi
+    [[ -z "$cmd" || "$cmd" == "$buffer" ]] && continue
+    [[ "$cmd" == "$buffer"* || "$cmd" == *"$buffer"* ]] && continue
+    if _fuzzy_match "$buffer" "$cmd"; then
+      echo "$cmd"
+      return 0
+    fi
+  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+
+  return 1
+}
+
 
 # Ensure cache is populated for current directory (call BEFORE using cache in subshell)
 _ensure_most_frequent_cached() {
@@ -495,6 +562,63 @@ _get_all_contextual_matches() {
     return 0
   fi
 
+  return 1
+}
+
+# Fuzzy search contextual history for menu (returns multiple matches)
+_menu_get_contextual_fuzzy_matches() {
+  local query="$1"
+  local -a matches
+  local -A seen
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+
+  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+  [[ -z "$cmd_list" ]] && return 1
+
+  local entry cmd count=0
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+    [[ -n "${seen[$cmd]}" ]] && continue
+    [[ "$cmd" == *"$query"* ]] && continue
+    if _fuzzy_match "$query" "$cmd"; then
+      matches+=("$cmd")
+      seen[$cmd]=1
+      (( ++count >= ZEAL_MENU_MAX_RESULTS )) && break
+    fi
+  done <<< "$cmd_list"
+
+  (( ${#matches[@]} > 0 )) && printf '%s\n' "${matches[@]}" && return 0
+  return 1
+}
+
+# Fuzzy search global history for menu (returns multiple matches)
+_menu_get_global_fuzzy_matches() {
+  local query="$1"
+  local -a matches
+  local -A seen
+  local count=0
+  local history_file="${HISTFILE:-$HOME/.zsh_history}"
+  [[ ! -f "$history_file" ]] && return 1
+
+  local line cmd
+  while IFS= read -r line; do
+    if [[ "$line" == ":"*";"* ]]; then
+      cmd="${line#*;}"
+    else
+      cmd="$line"
+    fi
+    [[ -z "$cmd" ]] && continue
+    [[ -n "${seen[$cmd]}" ]] && continue
+    [[ "$cmd" == *"$query"* ]] && continue
+    if _fuzzy_match "$query" "$cmd"; then
+      matches+=("$cmd")
+      seen[$cmd]=1
+      (( ++count >= ZEAL_MENU_MAX_RESULTS )) && break
+    fi
+  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+
+  (( ${#matches[@]} > 0 )) && printf '%s\n' "${matches[@]}" && return 0
   return 1
 }
 
@@ -747,6 +871,16 @@ _autosuggest_modify() {
       suggestion=$(_search_global_history_substring "$BUFFER")
     fi
 
+    # 5. Contextual fuzzy match (directory-aware)
+    if [[ -z "$suggestion" ]]; then
+      suggestion=$(_search_contextual_history_fuzzy "$BUFFER")
+    fi
+
+    # 6. Global fuzzy match
+    if [[ -z "$suggestion" ]]; then
+      suggestion=$(_search_global_history_fuzzy "$BUFFER")
+    fi
+
     if [[ -n "$suggestion" ]]; then
       # Skip if this command failed in the current session
       if [[ -n "${_FAILED_COMMANDS[$suggestion]}" ]]; then
@@ -772,6 +906,11 @@ _autosuggest_modify() {
         POSTDISPLAY=" → $_AUTOSUGGEST_SUGGESTION"
 
         # Highlight it in grey (different style to indicate substring match)
+        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
+      # For fuzzy matches, show full command with fuzzy indicator
+      elif [[ "$suggestion" != "$BUFFER" ]]; then
+        _AUTOSUGGEST_SUGGESTION="$suggestion"
+        POSTDISPLAY=" ≈ $_AUTOSUGGEST_SUGGESTION"
         region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
       fi
     fi
@@ -865,9 +1004,8 @@ _autosuggest_show_dropdown() {
 
 _autosuggest_accept() {
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
-    # Check if it's a substring match (contains " → ")
-    if [[ "$POSTDISPLAY" == " → "* ]]; then
-      # Replace buffer with the full suggestion (substring match)
+    # Check if it's a substring or fuzzy match (full command replacement)
+    if [[ "$POSTDISPLAY" == " → "* || "$POSTDISPLAY" == " ≈ "* ]]; then
       BUFFER="$_AUTOSUGGEST_SUGGESTION"
     else
       # Append the completion part (prefix match)
@@ -963,7 +1101,19 @@ _menu_update_matches() {
     done <<< "$matches_output"
   fi
 
-  # If no contextual matches, fall back to global history
+  # If no contextual substring matches, try contextual fuzzy
+  if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} == 0 )) && [[ -n "$query" ]]; then
+    local fuzzy_output
+    fuzzy_output=$(_menu_get_contextual_fuzzy_matches "$query")
+    if [[ -n "$fuzzy_output" ]]; then
+      local line
+      while IFS= read -r line; do
+        _MENU_MATCHES_CONTEXTUAL+=("$line")
+      done <<< "$fuzzy_output"
+    fi
+  fi
+
+  # If no contextual matches at all, fall back to global history
   if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} == 0 )); then
     local global_matches_output
     global_matches_output=$(_menu_get_global_substring_matches "$query")
@@ -972,6 +1122,18 @@ _menu_update_matches() {
       while IFS= read -r line; do
         _MENU_MATCHES_GLOBAL+=("$line")
       done <<< "$global_matches_output"
+    fi
+
+    # If no global substring matches, try global fuzzy
+    if (( ${#_MENU_MATCHES_GLOBAL[@]} == 0 )) && [[ -n "$query" ]]; then
+      local gfuzzy_output
+      gfuzzy_output=$(_menu_get_global_fuzzy_matches "$query")
+      if [[ -n "$gfuzzy_output" ]]; then
+        local line
+        while IFS= read -r line; do
+          _MENU_MATCHES_GLOBAL+=("$line")
+        done <<< "$gfuzzy_output"
+      fi
     fi
   fi
 }
