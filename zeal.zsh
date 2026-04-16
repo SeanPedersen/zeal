@@ -12,6 +12,10 @@
 : ${ZEAL_MENU_DROPDOWN_SIZE:=5}           # Visible items in auto-dropdown
 : ${ZEAL_MENU_CTRLR_SIZE:=12}            # Visible items in CTRL+R menu
 
+# Frecency: score = frequency * recency_weight
+# Recent commands get exponentially higher weight
+: ${ZEAL_FRECENCY_HALFLIFE:=14}           # Days until a command's recency weight halves
+
 # Prompt
 : ${ZEAL_SHORTEN_PATH:=true}             # Fish-style shortened paths
 : ${ZEAL_SHOW_EXEC_TIME:=true}           # Show command execution time in RPROMPT
@@ -140,23 +144,36 @@ _load_contextual_history_async() {
   # Background job to parse and generate cache file
   {
     typeset -A temp_history
-    local line dir cmd
+    local line dir cmd ts rest
 
     # Read last 10000 lines (most recent commands)
+    # Supports both old format (dir|||cmd) and new format (dir|||timestamp|||cmd)
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
 
       # Split on first occurrence of |||
       dir="${line%%|||*}"
-      cmd="${line#*|||}"
+      rest="${line#*|||}"
+      [[ -z "$rest" || -z "$dir" || "$rest" == "$line" ]] && continue
 
-      [[ -z "$cmd" || -z "$dir" || "$cmd" == "$line" ]] && continue
-
-      # Prepend to list for this directory (newest first)
-      if [[ -n "${temp_history[$dir]}" ]]; then
-        temp_history[$dir]="${cmd}"$'\n'"${temp_history[$dir]}"
+      # Check if rest contains another ||| (new format with timestamp)
+      if [[ "$rest" == *"|||"* ]]; then
+        ts="${rest%%|||*}"
+        cmd="${rest#*|||}"
       else
-        temp_history[$dir]="${cmd}"
+        # Old format: no timestamp, use 0
+        ts="0"
+        cmd="$rest"
+      fi
+
+      [[ -z "$cmd" ]] && continue
+
+      # Store as "timestamp|||cmd" per entry (newest first)
+      local entry="${ts}|||${cmd}"
+      if [[ -n "${temp_history[$dir]}" ]]; then
+        temp_history[$dir]="${entry}"$'\n'"${temp_history[$dir]}"
+      else
+        temp_history[$dir]="${entry}"
       fi
     done < <(tail -10000 "$_CONTEXTUAL_HISTORY_FILE" 2>/dev/null)
 
@@ -235,16 +252,18 @@ _store_contextual_history() {
 
   # Only store in contextual history if not whitelisted
   if [[ "$store_contextual" == "true" ]]; then
-    # Append to contextual history file (async writes are fine)
-    echo "$cmd_pwd|||$command" >> "$_CONTEXTUAL_HISTORY_FILE"
+    # Append to contextual history file with timestamp
+    local now=$EPOCHSECONDS
+    echo "$cmd_pwd|||${now}|||$command" >> "$_CONTEXTUAL_HISTORY_FILE"
 
     # Update in-memory index immediately (if loaded)
     if [[ "$_CONTEXTUAL_HISTORY_LOADED" == "true" ]]; then
-      # Prepend to directory's command list (newest first)
+      # Prepend to directory's command list (newest first), format: "timestamp|||cmd"
+      local entry="${now}|||${command}"
       if [[ -n "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" ]]; then
-        _CONTEXTUAL_HISTORY[$cmd_pwd]="${command}"$'\n'"${_CONTEXTUAL_HISTORY[$cmd_pwd]}"
+        _CONTEXTUAL_HISTORY[$cmd_pwd]="${entry}"$'\n'"${_CONTEXTUAL_HISTORY[$cmd_pwd]}"
       else
-        _CONTEXTUAL_HISTORY[$cmd_pwd]="${command}"
+        _CONTEXTUAL_HISTORY[$cmd_pwd]="${entry}"
       fi
 
       local cmd_count=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | wc -l)
@@ -282,19 +301,18 @@ _search_contextual_history() {
   local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Search through commands (newest first) for prefix match
-  local line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+  local entry cmd
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    # Inline extraction: "ts|||cmd" -> cmd, or plain cmd for old format
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
 
-    # Check if this command starts with the buffer
-    if [[ "$line" == "$buffer"* && "$line" != "$buffer" ]]; then
-      echo "$line"
+    if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
+      echo "$cmd"
       return 0
     fi
   done <<< "$cmd_list"
 
-  # No match found
   return 1
 }
 
@@ -302,33 +320,27 @@ _search_contextual_history() {
 _search_contextual_history_substring() {
   local buffer="$1"
 
-  # If not loaded yet, return nothing (will fall back to global)
   [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
 
-  # Check if command is in global whitelist
   local first_word="${buffer%% *}"
   if (( ${_CONTEXTUAL_HISTORY_GLOBAL_WHITELIST[(I)$first_word]} )); then
-    # Command is whitelisted - skip contextual lookup
     return 1
   fi
 
-  # Get command list for current directory
   local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Search through commands (newest first) for substring match
-  local line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+  local entry cmd
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
 
-    # Check if this command contains the buffer as substring (but doesn't start with it)
-    if [[ "$line" == *"$buffer"* && "$line" != "$buffer"* && "$line" != "$buffer" ]]; then
-      echo "$line"
+    if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
+      echo "$cmd"
       return 0
     fi
   done <<< "$cmd_list"
 
-  # No match found
   return 1
 }
 
@@ -402,31 +414,48 @@ _get_most_frequent_contextual_command() {
   return 1
 }
 
-# Recalculate most frequent command for a specific directory (called on command addition)
+# Recalculate best command for a directory using frecency scoring
+# Frecency = sum of recency weights per occurrence
+# Weight decays with age: halflife / (halflife + age)
 _recalc_most_frequent_for_dir() {
   local dir="$1"
 
   local cmd_list="${_CONTEXTUAL_HISTORY[$dir]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Split into array using parameter expansion (much faster than here-string)
-  local -a cmds=("${(@f)cmd_list}")
+  local -a entries=("${(@f)cmd_list}")
+  local now=$EPOCHSECONDS
+  local -i halflife_secs=$((ZEAL_FRECENCY_HALFLIFE * 86400))
 
-  # Count frequencies using associative array (limit to first 100 for performance)
-  local -A freq
-  local cmd max_cmd="" max_count=0 count
-  for cmd in "${cmds[@]:0:$ZEAL_CONTEXT_HISTORY_MAX}"; do
+  local -A scores
+  local entry cmd ts age_secs weight best_cmd="" best_score=0
+  for entry in "${entries[@]:0:$ZEAL_CONTEXT_HISTORY_MAX}"; do
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" == *"|||"* ]]; then
+      ts="${entry%%|||*}"
+      cmd="${entry#*|||}"
+    else
+      ts=0; cmd="$entry"
+    fi
     [[ -z "$cmd" ]] && continue
-    # Use (e) flag for exact matching to handle special characters in commands
-    count=$(( ${freq[(e)$cmd]:-0} + 1 ))
-    freq[(e)$cmd]=$count
-    if (( count > max_count )); then
-      max_count=$count
-      max_cmd="$cmd"
+
+    if (( ts > 0 )); then
+      age_secs=$(( now - ts ))
+      (( age_secs < 0 )) && age_secs=0
+      weight=$(( (halflife_secs * 1000) / (halflife_secs + age_secs) ))
+    else
+      weight=100
+    fi
+
+    scores[(e)$cmd]=$(( ${scores[(e)$cmd]:-0} + weight ))
+
+    if (( ${scores[(e)$cmd]} > best_score )); then
+      best_score=${scores[(e)$cmd]}
+      best_cmd="$cmd"
     fi
   done
 
-  [[ -n "$max_cmd" ]] && _CONTEXTUAL_HISTORY_MOST_FREQUENT[$dir]="$max_cmd"
+  [[ -n "$best_cmd" ]] && _CONTEXTUAL_HISTORY_MOST_FREQUENT[$dir]="$best_cmd"
 }
 
 # Get all contextual matches for cycling (used by arrow-up)
@@ -450,15 +479,13 @@ _get_all_contextual_matches() {
   local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Collect all matching commands
-  local line
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+  local entry cmd
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
 
-    # If buffer is empty, match all commands
-    # If buffer has text, match only prefix
-    if [[ -z "$buffer" || "$line" == "$buffer"* ]]; then
-      matches+=("$line")
+    if [[ -z "$buffer" || "$cmd" == "$buffer"* ]]; then
+      matches+=("$cmd")
     fi
   done <<< "$cmd_list"
 
@@ -484,23 +511,17 @@ _menu_get_contextual_substring_matches() {
   local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
   [[ -z "$cmd_list" ]] && return 1
 
-  # Collect all matching commands (substring match, deduplicated)
-  # Note: cmd_list is already stored newest-first, so we preserve that order
-  local line
-  local count=0
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
+  local entry cmd count=0
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
 
-    # Skip if we've already seen this exact command (deduplication)
-    [[ -n "${seen[$line]}" ]] && continue
+    [[ -n "${seen[$cmd]}" ]] && continue
 
-    # If query is empty, match all commands (up to max limit for performance)
-    # If query has text, match if line contains query as substring
-    if [[ -z "$query" || "$line" == *"$query"* ]]; then
-      matches+=("$line")
-      seen[$line]=1
-      count=$((count + 1))
-      [[ $count -ge $ZEAL_MENU_MAX_RESULTS ]] && break
+    if [[ -z "$query" || "$cmd" == *"$query"* ]]; then
+      matches+=("$cmd")
+      seen[$cmd]=1
+      (( ++count >= ZEAL_MENU_MAX_RESULTS )) && break
     fi
   done <<< "$cmd_list"
 
