@@ -1,9 +1,29 @@
 # ZEAL: smart & fast ZSH config
 
+# ============================================================================
+# Configuration (override these in .zshrc BEFORE sourcing zeal.zsh)
+# ============================================================================
+
+# History
+: ${ZEAL_HISTSIZE:=10000}
+: ${ZEAL_CONTEXT_HISTORY_MAX:=100}       # Max commands per directory in memory
+: ${ZEAL_SESSION_HISTORY_MAX:=1000}       # Max commands tracked per session
+: ${ZEAL_MENU_MAX_RESULTS:=100}           # Max matches in CTRL+R menu
+: ${ZEAL_MENU_DROPDOWN_SIZE:=5}           # Visible items in auto-dropdown
+: ${ZEAL_MENU_CTRLR_SIZE:=12}            # Visible items in CTRL+R menu
+
+# Prompt
+: ${ZEAL_SHORTEN_PATH:=true}             # Fish-style shortened paths
+: ${ZEAL_SHOW_EXEC_TIME:=true}           # Show command execution time in RPROMPT
+: ${ZEAL_SHOW_TIMESTAMP:=true}           # Show clock in RPROMPT
+: ${ZEAL_GIT_AUTO_FETCH:=true}           # Auto-fetch on cd into new repo
+
+# ============================================================================
+
 # History settings
 HISTFILE=~/.zsh_history
-HISTSIZE=10000
-SAVEHIST=10000
+HISTSIZE=$ZEAL_HISTSIZE
+SAVEHIST=$ZEAL_HISTSIZE
 setopt HIST_IGNORE_ALL_DUPS
 setopt HIST_IGNORE_SPACE    # Ignore commands that start with a space.
 setopt HIST_REDUCE_BLANKS   # Remove unnecessary blank lines.
@@ -61,7 +81,7 @@ _CONTEXTUAL_HISTORY_GLOBAL_WHITELIST=(
 
 # Track current session commands for ARROW UP/DOWN when buffer is empty
 typeset -ga _SESSION_HISTORY_COMMANDS
-typeset -g _SESSION_HISTORY_MAX=1000
+typeset -g _SESSION_HISTORY_MAX=$ZEAL_SESSION_HISTORY_MAX
 
 # State for arrow-up/down cycling through session history
 typeset -g _HISTORY_CYCLE_INDEX=0            # Current position in list
@@ -80,7 +100,7 @@ typeset -g _MENU_DROPDOWN_ENTERED=false       # Has user explicitly entered drop
 typeset -g _MENU_DISPLAY_OFFSET=0             # Scroll offset for long lists
 typeset -g _MENU_ORIGINAL_BUFFER=""           # Buffer before search started
 typeset -g _MENU_ORIGINAL_KEYMAP=""           # Keymap before search started
-typeset -g _MENU_MAX_DISPLAY=5                # Max items to display at once (5 for auto-dropdown)
+typeset -g _MENU_MAX_DISPLAY=$ZEAL_MENU_DROPDOWN_SIZE
 typeset -g _TAB_COMPLETION_ACTIVE=false       # Flag to suppress dropdown during TAB completion
 
 # Signal handler for async load completion (using USR2, USR1 is used by git fetch)
@@ -143,8 +163,8 @@ _load_contextual_history_async() {
     # Limit each directory to 100 newest entries (list is already newest-first)
     for dir in "${(@k)temp_history}"; do
       local cmd_count=$(echo "${temp_history[$dir]}" | wc -l)
-      if (( cmd_count > 100 )); then
-        temp_history[$dir]=$(echo "${temp_history[$dir]}" | head -100)
+      if (( cmd_count > ZEAL_CONTEXT_HISTORY_MAX )); then
+        temp_history[$dir]=$(echo "${temp_history[$dir]}" | head -$ZEAL_CONTEXT_HISTORY_MAX)
       fi
     done
 
@@ -227,10 +247,9 @@ _store_contextual_history() {
         _CONTEXTUAL_HISTORY[$cmd_pwd]="${command}"
       fi
 
-      # Limit in-memory entries per directory to 100 (prevent memory bloat)
       local cmd_count=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | wc -l)
-      if (( cmd_count > 100 )); then
-        _CONTEXTUAL_HISTORY[$cmd_pwd]=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | head -100)
+      if (( cmd_count > ZEAL_CONTEXT_HISTORY_MAX )); then
+        _CONTEXTUAL_HISTORY[$cmd_pwd]=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | head -$ZEAL_CONTEXT_HISTORY_MAX)
       fi
 
       # Recalculate most frequent command for this directory
@@ -396,7 +415,7 @@ _recalc_most_frequent_for_dir() {
   # Count frequencies using associative array (limit to first 100 for performance)
   local -A freq
   local cmd max_cmd="" max_count=0 count
-  for cmd in "${cmds[@]:0:100}"; do
+  for cmd in "${cmds[@]:0:$ZEAL_CONTEXT_HISTORY_MAX}"; do
     [[ -z "$cmd" ]] && continue
     # Use (e) flag for exact matching to handle special characters in commands
     count=$(( ${freq[(e)$cmd]:-0} + 1 ))
@@ -481,8 +500,7 @@ _menu_get_contextual_substring_matches() {
       matches+=("$line")
       seen[$line]=1
       count=$((count + 1))
-      # Limit to 100 matches for performance
-      [[ $count -ge 100 ]] && break
+      [[ $count -ge $ZEAL_MENU_MAX_RESULTS ]] && break
     fi
   done <<< "$cmd_list"
 
@@ -498,12 +516,10 @@ _menu_get_contextual_substring_matches() {
 # Get global matches using substring search (for CTRL+R menu)
 _menu_get_global_substring_matches() {
   local query="$1"
-  local max_results=100
   local -a matches
   local -A seen
   local count=0
 
-  # Read from zsh history file directly (more reliable than fc in ZLE context)
   local history_file="${HISTFILE:-$HOME/.zsh_history}"
   [[ ! -f "$history_file" ]] && return 1
 
@@ -529,8 +545,7 @@ _menu_get_global_substring_matches() {
       matches+=("$cmd")
       seen[$cmd]=1
       count=$((count + 1))
-      # Limit results for performance
-      [[ $count -ge $max_results ]] && break
+      [[ $count -ge $ZEAL_MENU_MAX_RESULTS ]] && break
     fi
   done < <(tail -2000 "$history_file" 2>/dev/null | tac)
 
@@ -780,7 +795,7 @@ _autosuggest_show_dropdown() {
   fi
 
   # Use 5 items for auto-dropdown
-  _MENU_MAX_DISPLAY=5
+  _MENU_MAX_DISPLAY=$ZEAL_MENU_DROPDOWN_SIZE
 
   # Check if buffer changed while in dropdown (user typed something)
   if [[ "$_MENU_DROPDOWN_ENTERED" == "true" && "$BUFFER" != "$_MENU_SEARCH_QUERY" ]]; then
@@ -1086,7 +1101,7 @@ _menu_search_start() {
   _menu_update_matches "$BUFFER"
 
   # Display menu (use larger display for explicit CTRL+R mode)
-  _MENU_MAX_DISPLAY=12
+  _MENU_MAX_DISPLAY=$ZEAL_MENU_CTRLR_SIZE
 
   # On empty buffer, immediately enter dropdown with first item selected
   if [[ -z "$BUFFER" ]]; then
@@ -1194,7 +1209,7 @@ _autosuggest_clear_on_finish() {
   _MENU_MATCHES_GLOBAL=()
   _MENU_SELECTED_INDEX=0
   _MENU_DROPDOWN_ENTERED=false
-  _MENU_MAX_DISPLAY=5
+  _MENU_MAX_DISPLAY=$ZEAL_MENU_DROPDOWN_SIZE
 }
 
 # Handle Enter in menu mode
@@ -1227,7 +1242,7 @@ _menu_search_accept() {
     _MENU_DROPDOWN_ENTERED=false
     _MENU_DISPLAY_OFFSET=0
     _MENU_ORIGINAL_BUFFER=""
-    _MENU_MAX_DISPLAY=5
+    _MENU_MAX_DISPLAY=$ZEAL_MENU_DROPDOWN_SIZE
 
     # Clear the menu display
     zle -M ""
@@ -1272,7 +1287,7 @@ _menu_search_cancel() {
     _MENU_DROPDOWN_ENTERED=false
     _MENU_DISPLAY_OFFSET=0
     _MENU_ORIGINAL_BUFFER=""
-    _MENU_MAX_DISPLAY=5
+    _MENU_MAX_DISPLAY=$ZEAL_MENU_DROPDOWN_SIZE
 
     # Restore the original buffer (what was there before entering menu mode)
     BUFFER="$saved_buffer"
@@ -1746,6 +1761,8 @@ TRAPUSR1() {
 
 # Function to run git fetch when entering new repo
 _auto_git_fetch() {
+  [[ "$ZEAL_GIT_AUTO_FETCH" != "true" ]] && return
+
   # Quick check: if we're still in the cached repo, skip everything
   if [[ -n "$_CURRENT_GIT_REPO" && "$PWD" == "$_CURRENT_GIT_REPO"* ]]; then
     return
@@ -1843,8 +1860,13 @@ _shorten_path() {
 }
 
 prompt_dir() {
-  # Don't add separator here - let git segment handle it
-  local result="%K{blue}%F{black} $(_shorten_path) %k%f"
+  local dir_display
+  if [[ "$ZEAL_SHORTEN_PATH" == "true" ]]; then
+    dir_display="$(_shorten_path)"
+  else
+    dir_display="${PWD/#$HOME/~}"
+  fi
+  local result="%K{blue}%F{black} ${dir_display} %k%f"
   echo "$result"
 }
 
@@ -1863,8 +1885,14 @@ prompt_git() {
 # Build prompt
 PROMPT='$(prompt_status)$(prompt_user)$(prompt_dir)$(prompt_git) '
 
-# Right prompt with execution time
-RPROMPT='%F{green}${cmd_exec_time:+took $cmd_exec_time} %D{%H:%M:%S}%f'
+# Right prompt with execution time and clock
+_build_rprompt() {
+  local parts=""
+  [[ "$ZEAL_SHOW_EXEC_TIME" == "true" ]] && parts+='${cmd_exec_time:+took $cmd_exec_time}'
+  [[ "$ZEAL_SHOW_TIMESTAMP" == "true" ]] && parts+=' %D{%H:%M:%S}'
+  echo "%F{green}${parts}%f"
+}
+RPROMPT="$(_build_rprompt)"
 
 # ----------------------------------------------------------------------------
 # Initialize Contextual History
