@@ -22,6 +22,14 @@
 : ${ZEAL_SHOW_TIMESTAMP:=true}           # Show clock in RPROMPT
 : ${ZEAL_GIT_AUTO_FETCH:=true}           # Auto-fetch on cd into new repo
 
+# Syntax highlighting colors (ANSI color names or numbers)
+: ${ZEAL_COLOR_CMD_VALID:=green}          # Valid command
+: ${ZEAL_COLOR_CMD_INVALID:=red}          # Unknown command
+: ${ZEAL_COLOR_FLAG:=cyan}               # Flags like --verbose, -v
+: ${ZEAL_COLOR_STRING:=yellow}           # Quoted strings
+: ${ZEAL_COLOR_OPERATOR:=magenta}        # Pipes, redirections, &&, ||, ;
+: ${ZEAL_COLOR_COMMENT:=8}              # Comments (#)
+
 # ============================================================================
 
 # History settings
@@ -56,6 +64,7 @@ _init_hooks() {
   add-zle-hook-widget line-finish _autosuggest_clear_on_finish
   add-zle-hook-widget line-pre-redraw _history_cycle_check_reset
   add-zle-hook-widget line-pre-redraw _menu_search_buffer_change
+  add-zle-hook-widget line-pre-redraw _syntax_highlight
 
   # Register directory change hooks
   add-zsh-hook chpwd _auto_git_fetch
@@ -1014,7 +1023,7 @@ _autosuggest_accept() {
     CURSOR=${#BUFFER}
     _AUTOSUGGEST_SUGGESTION=""
     POSTDISPLAY=""
-    region_highlight=()
+    region_highlight=("${(@)region_highlight:#*autosuggest*}")
     zle -R
   fi
 }
@@ -1031,7 +1040,7 @@ _autosuggest_accept_or_forward_char() {
 _autosuggest_clear() {
   _AUTOSUGGEST_SUGGESTION=""
   POSTDISPLAY=""
-  region_highlight=()
+  region_highlight=("${(@)region_highlight:#*autosuggest*}")
 }
 
 # Widget to show frequent command (can be called from signal handlers)
@@ -1776,6 +1785,142 @@ precmd() {
   # Disable CTRL+C interrupt character so ZLE can handle it
   stty intr undef
 
+}
+
+# ----------------------------------------------------------------------------
+# Syntax Highlighting
+# ----------------------------------------------------------------------------
+
+typeset -gA _SYNTAX_CMD_CACHE   # cmd -> 0 (valid) or 1 (invalid)
+typeset -g _SYNTAX_LAST_BUF=""  # cached buffer for skip-if-unchanged
+typeset -ga _SYNTAX_LAST_HL=()  # cached highlight entries
+
+_syntax_highlight() {
+  emulate -L zsh
+
+  # Remove previous syntax highlights (preserve autosuggest)
+  region_highlight=("${(@)region_highlight:#*syntax*}")
+
+  [[ -z "$BUFFER" ]] && { _SYNTAX_LAST_BUF=""; return; }
+
+  # Skip re-parse if buffer unchanged — just re-apply cached highlights
+  if [[ "$BUFFER" == "$_SYNTAX_LAST_BUF" ]]; then
+    region_highlight+=("${_SYNTAX_LAST_HL[@]}")
+    return
+  fi
+
+  local buf="$BUFFER"
+  local -i len=${#buf} i=0
+  local -i word_start=-1 is_cmd=1
+  local in_q=""
+  local -i q_start=0
+
+  # Collect syntax highlights in local array
+  local -a _sh_hl=()
+
+  while (( i <= len )); do
+    local c=""
+    (( i < len )) && c="${buf:$i:1}"
+
+    # Inside quotes
+    if [[ -n "$in_q" ]]; then
+      if [[ "$c" == "$in_q" ]]; then
+        _sh_hl+=("$q_start $((i + 1)) fg=${ZEAL_COLOR_STRING} syntax")
+        in_q=""
+      elif [[ -z "$c" ]]; then
+        _sh_hl+=("$q_start $i fg=${ZEAL_COLOR_STRING} syntax")
+        in_q=""
+      fi
+      (( i++ )); continue
+    fi
+
+    # Start quote
+    if [[ "$c" == "'" || "$c" == '"' ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; is_cmd=0; }
+      in_q="$c"; q_start=$i; (( i++ )); continue
+    fi
+
+    # Semicolon
+    if [[ "$c" == ";" ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; }
+      _sh_hl+=("$i $((i + 1)) fg=${ZEAL_COLOR_OPERATOR} syntax")
+      (( i++ )); is_cmd=1; continue
+    fi
+
+    # Pipe
+    if [[ "$c" == "|" ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; }
+      local -i olen=1; [[ "${buf:$((i+1)):1}" == "|" ]] && olen=2
+      _sh_hl+=("$i $((i + olen)) fg=${ZEAL_COLOR_OPERATOR} syntax")
+      (( i += olen )); is_cmd=1; continue
+    fi
+
+    # Double ampersand
+    if [[ "$c" == "&" && "${buf:$((i+1)):1}" == "&" ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; }
+      _sh_hl+=("$i $((i + 2)) fg=${ZEAL_COLOR_OPERATOR} syntax")
+      (( i += 2 )); is_cmd=1; continue
+    fi
+
+    # Redirections
+    if [[ "$c" == ">" || "$c" == "<" ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; }
+      local -i rlen=1
+      [[ "${buf:$((i+1)):1}" == "$c" || "${buf:$((i+1)):1}" == "&" ]] && rlen=2
+      _sh_hl+=("$i $((i + rlen)) fg=${ZEAL_COLOR_OPERATOR} syntax")
+      (( i += rlen )); continue
+    fi
+
+    # Comment
+    if [[ "$c" == "#" && ( $i -eq 0 || "${buf:$((i-1)):1}" == " " ) ]]; then
+      (( word_start >= 0 )) && { _sh_w; word_start=-1; }
+      _sh_hl+=("$i $len fg=${ZEAL_COLOR_COMMENT} syntax")
+      break
+    fi
+
+    # Word boundary or end
+    if [[ "$c" == " " || -z "$c" ]]; then
+      if (( word_start >= 0 )); then
+        local w="${buf:$word_start:$((i - word_start))}"
+        _sh_w
+        if (( is_cmd )); then
+          case "$w" in
+            sudo|command|builtin|exec|env|noglob|nocorrect) ;;
+            *) is_cmd=0 ;;
+          esac
+        fi
+        word_start=-1
+      fi
+      (( i++ )); continue
+    fi
+
+    (( word_start < 0 )) && word_start=$i
+    (( i++ ))
+  done
+
+  # Cache and apply
+  _SYNTAX_LAST_BUF="$buf"
+  _SYNTAX_LAST_HL=("${_sh_hl[@]}")
+  region_highlight+=("${_sh_hl[@]}")
+}
+
+# Highlight a single word — reads word_start, i, is_cmd, buf from caller scope
+# Appends to caller's _sh_hl array (no subshell)
+_sh_w() {
+  local w="${buf:$word_start:$((i - word_start))}"
+
+  if (( is_cmd )); then
+    if [[ -z "${_SYNTAX_CMD_CACHE[$w]+x}" ]]; then
+      whence "$w" &>/dev/null && _SYNTAX_CMD_CACHE[$w]=0 || _SYNTAX_CMD_CACHE[$w]=1
+    fi
+    if (( _SYNTAX_CMD_CACHE[$w] == 0 )); then
+      _sh_hl+=("$word_start $i fg=${ZEAL_COLOR_CMD_VALID} syntax")
+    else
+      _sh_hl+=("$word_start $i fg=${ZEAL_COLOR_CMD_INVALID},underline syntax")
+    fi
+  elif [[ "$w" == -* && ${#w} -gt 1 ]]; then
+    _sh_hl+=("$word_start $i fg=${ZEAL_COLOR_FLAG} syntax")
+  fi
 }
 
 # ----------------------------------------------------------------------------
