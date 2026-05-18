@@ -629,7 +629,9 @@ _completion_on_demand() {
 
   # Clear any existing autosuggestion before TAB completion
   POSTDISPLAY=""
+  region_highlight=("${(@)region_highlight:#*memo=autosuggest*}")
   region_highlight=("${(@)region_highlight:#*autosuggest*}")
+  region_highlight=("${(@)region_highlight:#*fg=240,bold*}")
 
   # Set flag to suppress dropdown during TAB completion
   _TAB_COMPLETION_ACTIVE=true
@@ -662,7 +664,9 @@ _autosuggest_show_frequent() {
   [[ -n "$BUFFER" ]] && return
 
   # Clear any previous autosuggest highlighting
+  region_highlight=("${(@)region_highlight:#*memo=autosuggest*}")
   region_highlight=("${(@)region_highlight:#*autosuggest*}")
+  region_highlight=("${(@)region_highlight:#*fg=240,bold*}")
   POSTDISPLAY=""
   _AUTOSUGGEST_SUGGESTION=""
 
@@ -673,7 +677,7 @@ _autosuggest_show_frequent() {
     _AUTOSUGGEST_SUGGESTION="$freq_cmd"
     POSTDISPLAY="$freq_cmd"
     # Highlight POSTDISPLAY in grey (starts at CURSOR position which is 0 for empty buffer)
-    region_highlight+=("0 ${#freq_cmd} fg=240,bold autosuggest")
+    region_highlight+=("0 ${#freq_cmd} fg=240,bold memo=autosuggest")
   fi
 
 }
@@ -696,7 +700,9 @@ _autosuggest_modify() {
   # During history cycling, suppress autosuggestions to avoid visual confusion
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
     _AUTOSUGGEST_SUGGESTION=""
+    region_highlight=("${(@)region_highlight:#*memo=autosuggest*}")
     region_highlight=("${(@)region_highlight:#*autosuggest*}")
+    region_highlight=("${(@)region_highlight:#*fg=240,bold*}")
     POSTDISPLAY=""
     if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
       zle -M ""
@@ -731,7 +737,9 @@ _autosuggest_modify() {
 
   # Clear previous suggestion
   _AUTOSUGGEST_SUGGESTION=""
+  region_highlight=("${(@)region_highlight:#*memo=autosuggest*}")
   region_highlight=("${(@)region_highlight:#*autosuggest*}")
+  region_highlight=("${(@)region_highlight:#*fg=240,bold*}")
   POSTDISPLAY=""
 
   # Only suggest if buffer is not empty and cursor is at end of buffer
@@ -771,7 +779,7 @@ _autosuggest_modify() {
         POSTDISPLAY="$_AUTOSUGGEST_SUGGESTION"
 
         # Highlight it in grey
-        region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold memo=autosuggest")
       # For substring matches, show the full command
       elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == *"$BUFFER"* ]]; then
         # Show full command as suggestion
@@ -781,7 +789,7 @@ _autosuggest_modify() {
         POSTDISPLAY=" → $_AUTOSUGGEST_SUGGESTION"
 
         # Highlight it in grey (different style to indicate substring match)
-        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold memo=autosuggest")
       fi
     fi
 
@@ -805,7 +813,7 @@ _autosuggest_modify() {
       if [[ -n "$freq_cmd" ]]; then
         _AUTOSUGGEST_SUGGESTION="$freq_cmd"
         POSTDISPLAY="$freq_cmd"
-        region_highlight+=("$CURSOR $(( CURSOR + ${#freq_cmd} )) fg=240,bold autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#freq_cmd} )) fg=240,bold memo=autosuggest")
       fi
     fi
   fi
@@ -874,18 +882,42 @@ _autosuggest_show_dropdown() {
 
 _autosuggest_accept() {
   if [[ -n "$_AUTOSUGGEST_SUGGESTION" ]]; then
-    # Check if it's a substring match (contains " → ")
-    if [[ "$POSTDISPLAY" == " → "* ]]; then
-      BUFFER="$_AUTOSUGGEST_SUGGESTION"
-    else
-      # Append the completion part (prefix match)
-      BUFFER="$BUFFER$_AUTOSUGGEST_SUGGESTION"
-    fi
-    CURSOR=${#BUFFER}
+    # Snapshot whether the current display is a substring match before clearing it.
+    local was_substring_match=false
+    [[ "$POSTDISPLAY" == " → "* ]] && was_substring_match=true
+
+    # Clear the autosuggest display/highlight first. The grey highlight was created
+    # for POSTDISPLAY offsets; after accepting, those offsets become real BUFFER
+    # text, so leaving the highlight around even for one redraw makes the accepted
+    # command appear greyed out.
+    local old_buffer="$BUFFER"
+    local accepted_suggestion="$_AUTOSUGGEST_SUGGESTION"
     _AUTOSUGGEST_SUGGESTION=""
     POSTDISPLAY=""
-    region_highlight=("${(@)region_highlight:#*autosuggest*}")
+    # Force ZLE to drop POSTDISPLAY before mutating BUFFER. Without this,
+    # multi-part suggestions can leave the old POSTDISPLAY color state on the
+    # accepted argument/path text until the line is accepted.
     zle -R
+    region_highlight=()
+    zle -R
+
+    if [[ "$was_substring_match" == "true" ]]; then
+      BUFFER="$accepted_suggestion"
+    else
+      # Append the completion part (prefix match)
+      BUFFER="$BUFFER$accepted_suggestion"
+    fi
+
+    CURSOR=${#BUFFER}
+
+    # Force the accepted text back to the terminal default for this redraw.
+    # Syntax highlighting will add more specific regions (e.g. command names)
+    # after this, so the first word can still be colored while plain arguments
+    # do not inherit the previous grey autosuggest color.
+    region_highlight+=("0 ${#BUFFER} fg=default")
+
+    zle -R
+    zle reset-prompt 2>/dev/null
   fi
 }
 
@@ -901,7 +933,9 @@ _autosuggest_accept_or_forward_char() {
 _autosuggest_clear() {
   _AUTOSUGGEST_SUGGESTION=""
   POSTDISPLAY=""
+  region_highlight=("${(@)region_highlight:#*memo=autosuggest*}")
   region_highlight=("${(@)region_highlight:#*autosuggest*}")
+  region_highlight=("${(@)region_highlight:#*fg=240,bold*}")
 }
 
 # Widget to show frequent command (can be called from signal handlers)
@@ -915,7 +949,7 @@ _autosuggest_show_frequent_widget() {
   if [[ -n "$freq_cmd" ]]; then
     _AUTOSUGGEST_SUGGESTION="$freq_cmd"
     POSTDISPLAY="$freq_cmd"
-    region_highlight=("0 ${#freq_cmd} fg=240,bold autosuggest")
+    region_highlight=("0 ${#freq_cmd} fg=240,bold memo=autosuggest")
   fi
 }
 
@@ -1635,13 +1669,19 @@ typeset -ga _SYNTAX_LAST_HL=()  # cached highlight entries
 _syntax_highlight() {
   emulate -L zsh
 
-  # Remove previous syntax highlights (preserve autosuggest)
+  # Remove previous syntax/highlight-reset entries (preserve active autosuggest)
   region_highlight=("${(@)region_highlight:#*syntax*}")
+  # Keep one-shot `none` reset highlights for this redraw; they counteract
+  # stale grey autosuggest styling after accepting POSTDISPLAY text.
 
   [[ -z "$BUFFER" ]] && { _SYNTAX_LAST_BUF=""; return; }
 
-  # Skip re-parse if buffer unchanged — just re-apply cached highlights
+  # Skip re-parse if buffer unchanged — just re-apply cached highlights.
+  # Always include a full-buffer default foreground reset first; cached entries
+  # may come from before this reset existed, and unhighlighted arguments/paths
+  # otherwise can keep stale grey POSTDISPLAY styling after accepting a suggestion.
   if [[ "$BUFFER" == "$_SYNTAX_LAST_BUF" ]]; then
+    region_highlight+=("0 ${#BUFFER} fg=default syntax")
     region_highlight+=("${_SYNTAX_LAST_HL[@]}")
     return
   fi
@@ -1652,8 +1692,10 @@ _syntax_highlight() {
   local in_q=""
   local -i q_start=0
 
-  # Collect syntax highlights in local array
-  local -a _sh_hl=()
+  # Collect syntax highlights in local array. Start with an explicit default
+  # foreground over the whole buffer so unhighlighted words/arguments don't
+  # visually inherit stale colors from a previous POSTDISPLAY autosuggestion.
+  local -a _sh_hl=("0 $len fg=default syntax")
 
   while (( i <= len )); do
     local c=""
