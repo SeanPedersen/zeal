@@ -84,6 +84,8 @@ typeset -gA _CONTEXTUAL_HISTORY_MOST_FREQUENT # dir -> most frequent command (ca
 typeset -g _CONTEXTUAL_HISTORY_FILE="$HOME/.zsh_history_contextual"
 typeset -g _CONTEXTUAL_HISTORY_LOADED=false
 typeset -g _CONTEXTUAL_HISTORY_LOADING=false
+typeset -g _CONTEXTUAL_HISTORY_SEARCH_CACHE_DIR=""
+typeset -ga _CONTEXTUAL_HISTORY_SEARCH_CACHE=()
 
 # Commands that should always use global history (not contextual)
 typeset -ga _CONTEXTUAL_HISTORY_GLOBAL_WHITELIST
@@ -279,6 +281,10 @@ _store_contextual_history() {
       if (( cmd_count > ZEAL_CONTEXT_HISTORY_MAX )); then
         _CONTEXTUAL_HISTORY[$cmd_pwd]=$(echo "${_CONTEXTUAL_HISTORY[$cmd_pwd]}" | head -$ZEAL_CONTEXT_HISTORY_MAX)
       fi
+      if [[ "$_CONTEXTUAL_HISTORY_SEARCH_CACHE_DIR" == "$cmd_pwd" ]]; then
+        _CONTEXTUAL_HISTORY_SEARCH_CACHE_DIR=""
+        _CONTEXTUAL_HISTORY_SEARCH_CACHE=()
+      fi
 
       # Recalculate most frequent command for this directory
       _recalc_most_frequent_for_dir "$cmd_pwd"
@@ -293,11 +299,26 @@ _store_contextual_history() {
 }
 
 # Fast contextual search for auto-suggestions (prefix match)
+_ensure_contextual_history_search_cache() {
+  unsetopt xtrace 2>/dev/null
+
+  [[ "$_CONTEXTUAL_HISTORY_LOADED" == "true" ]] || return 1
+  [[ "$_CONTEXTUAL_HISTORY_SEARCH_CACHE_DIR" == "$PWD" && ${#_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]} -gt 0 ]] && return 0
+
+  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
+  [[ -n "$cmd_list" ]] || return 1
+
+  _CONTEXTUAL_HISTORY_SEARCH_CACHE_DIR="$PWD"
+  _CONTEXTUAL_HISTORY_SEARCH_CACHE=("${(@f)cmd_list}")
+}
+
 _search_contextual_history() {
+  unsetopt xtrace 2>/dev/null
+
   local buffer="$1"
 
   # If not loaded yet, return nothing (will fall back to global)
-  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+  _ensure_contextual_history_search_cache || return 1
 
   # Check if command is in global whitelist
   local first_word="${buffer%% *}"
@@ -306,12 +327,8 @@ _search_contextual_history() {
     return 1
   fi
 
-  # Get command list for current directory
-  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
-  [[ -z "$cmd_list" ]] && return 1
-
   local entry cmd
-  while IFS= read -r entry; do
+  for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
     [[ -z "$entry" ]] && continue
     # Inline extraction: "ts|||cmd" -> cmd, or plain cmd for old format
     [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
@@ -320,27 +337,26 @@ _search_contextual_history() {
       echo "$cmd"
       return 0
     fi
-  done <<< "$cmd_list"
+  done
 
   return 1
 }
 
 # Contextual search for auto-suggestions using substring match (fallback)
 _search_contextual_history_substring() {
+  unsetopt xtrace 2>/dev/null
+
   local buffer="$1"
 
-  [[ "$_CONTEXTUAL_HISTORY_LOADED" != "true" ]] && return 1
+  _ensure_contextual_history_search_cache || return 1
 
   local first_word="${buffer%% *}"
   if (( ${_CONTEXTUAL_HISTORY_GLOBAL_WHITELIST[(I)$first_word]} )); then
     return 1
   fi
 
-  local cmd_list="${_CONTEXTUAL_HISTORY[$PWD]}"
-  [[ -z "$cmd_list" ]] && return 1
-
   local entry cmd
-  while IFS= read -r entry; do
+  for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
     [[ -z "$entry" ]] && continue
     [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
 
@@ -348,16 +364,24 @@ _search_contextual_history_substring() {
       echo "$cmd"
       return 0
     fi
-  done <<< "$cmd_list"
+  done
 
   return 1
 }
 
 # Search global history file for prefix match (for auto-suggestion fallback)
-_search_global_history() {
-  local buffer="$1"
+typeset -ga _GLOBAL_HISTORY_SEARCH_CACHE=()
+typeset -g _GLOBAL_HISTORY_SEARCH_CACHE_FILE=""
+
+_ensure_global_history_search_cache() {
+  unsetopt xtrace 2>/dev/null
+
   local history_file="${HISTFILE:-$HOME/.zsh_history}"
-  [[ ! -f "$history_file" ]] && return 1
+  [[ -f "$history_file" ]] || return 1
+  [[ "$_GLOBAL_HISTORY_SEARCH_CACHE_FILE" == "$history_file" && ${#_GLOBAL_HISTORY_SEARCH_CACHE[@]} -gt 0 ]] && return 0
+
+  _GLOBAL_HISTORY_SEARCH_CACHE_FILE="$history_file"
+  _GLOBAL_HISTORY_SEARCH_CACHE=()
 
   local line cmd
   while IFS= read -r line; do
@@ -368,41 +392,95 @@ _search_global_history() {
       cmd="$line"
     fi
 
-    [[ -z "$cmd" ]] && continue
-
-    # Check prefix match
-    if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
-      echo "$cmd"
-      return 0
-    fi
+    [[ -n "$cmd" ]] && _GLOBAL_HISTORY_SEARCH_CACHE+=("$cmd")
   done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+}
+
+_search_global_history() {
+  unsetopt xtrace 2>/dev/null
+
+  local buffer="$1"
+  _ensure_global_history_search_cache || return 1
+
+  local -a matches
+  local cmd
+  matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#${buffer}*}")
+  for cmd in "${matches[@]}"; do
+    [[ "$cmd" != "$buffer" ]] && { echo "$cmd"; return 0; }
+  done
 
   return 1
 }
 
 # Search global history file for substring match (for auto-suggestion fallback)
 _search_global_history_substring() {
+  unsetopt xtrace 2>/dev/null
+
   local buffer="$1"
-  local history_file="${HISTFILE:-$HOME/.zsh_history}"
-  [[ ! -f "$history_file" ]] && return 1
+  _ensure_global_history_search_cache || return 1
 
-  local line cmd
-  while IFS= read -r line; do
-    # ZSH history format: ": timestamp:elapsed;command" or plain command
-    if [[ "$line" == ":"*";"* ]]; then
-      cmd="${line#*;}"
-    else
-      cmd="$line"
-    fi
-
-    [[ -z "$cmd" ]] && continue
-
+  local -a matches
+  matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#*${buffer}*}")
+  for cmd in "${matches[@]}"; do
     # Check substring match (but not prefix - we already tried those)
     if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
       echo "$cmd"
       return 0
     fi
-  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+  done
+
+  return 1
+}
+
+typeset -g _AUTOSUGGEST_SEARCH_RESULT=""
+
+_autosuggest_find_suggestion() {
+  unsetopt xtrace 2>/dev/null
+
+  local buffer="$1"
+  _AUTOSUGGEST_SEARCH_RESULT=""
+
+  local first_word="${buffer%% *}"
+  if (( ! ${_CONTEXTUAL_HISTORY_GLOBAL_WHITELIST[(I)$first_word]} )) && _ensure_contextual_history_search_cache; then
+    local entry cmd
+
+    for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
+      [[ -z "$entry" ]] && continue
+      [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+      if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
+        _AUTOSUGGEST_SEARCH_RESULT="$cmd"
+        return 0
+      fi
+    done
+
+    for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
+      [[ -z "$entry" ]] && continue
+      [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+      if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
+        _AUTOSUGGEST_SEARCH_RESULT="$cmd"
+        return 0
+      fi
+    done
+  fi
+
+  _ensure_global_history_search_cache || return 1
+
+  local -a matches
+  matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#${buffer}*}")
+  for cmd in "${matches[@]}"; do
+    if [[ "$cmd" != "$buffer" ]]; then
+      _AUTOSUGGEST_SEARCH_RESULT="$cmd"
+      return 0
+    fi
+  done
+
+  matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#*${buffer}*}")
+  for cmd in "${matches[@]}"; do
+    if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
+      _AUTOSUGGEST_SEARCH_RESULT="$cmd"
+      return 0
+    fi
+  done
 
   return 1
 }
@@ -508,6 +586,31 @@ _get_all_contextual_matches() {
 }
 
 # Get contextual matches using substring search (for CTRL+R menu)
+_menu_collect_contextual_substring_matches() {
+  unsetopt xtrace 2>/dev/null
+
+  local query="$1"
+  local -A seen
+
+  _MENU_MATCHES_CONTEXTUAL=()
+  _ensure_contextual_history_search_cache || return 1
+
+  local entry cmd count=0
+  for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+    [[ -n "${seen[$cmd]}" ]] && continue
+
+    if [[ -z "$query" || "$cmd" == *"$query"* ]]; then
+      _MENU_MATCHES_CONTEXTUAL+=("$cmd")
+      seen[$cmd]=1
+      (( ++count >= ZEAL_MENU_MAX_RESULTS )) && break
+    fi
+  done
+
+  (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 ))
+}
+
 _menu_get_contextual_substring_matches() {
   local query="$1"
   local -a matches
@@ -677,13 +780,14 @@ _autosuggest_show_frequent() {
     _AUTOSUGGEST_SUGGESTION="$freq_cmd"
     POSTDISPLAY="$freq_cmd"
     # Highlight POSTDISPLAY in grey (starts at CURSOR position which is 0 for empty buffer)
-    region_highlight+=("0 ${#freq_cmd} fg=240,bold memo=autosuggest")
+    region_highlight+=("0 ${#freq_cmd} fg=240,bold autosuggest")
   fi
 
 }
 
 _autosuggest_modify() {
   emulate -L zsh
+  unsetopt xtrace 2>/dev/null
 
   # Check if history cycling should be reset (user typed something)
   if [[ "$_HISTORY_CYCLE_IN_PROGRESS" == "true" ]]; then
@@ -746,23 +850,7 @@ _autosuggest_modify() {
   if [[ -n "$BUFFER" && $CURSOR -eq ${#BUFFER} ]]; then
     local suggestion=""
 
-    # 1. Contextual prefix match (directory-aware)
-    suggestion=$(_search_contextual_history "$BUFFER")
-
-    # 2. Contextual substring match (directory-aware)
-    if [[ -z "$suggestion" ]]; then
-      suggestion=$(_search_contextual_history_substring "$BUFFER")
-    fi
-
-    # 3. Global history file prefix match (excludes current session)
-    if [[ -z "$suggestion" ]]; then
-      suggestion=$(_search_global_history "$BUFFER")
-    fi
-
-    # 4. Global history file substring match (excludes current session)
-    if [[ -z "$suggestion" ]]; then
-      suggestion=$(_search_global_history_substring "$BUFFER")
-    fi
+    _autosuggest_find_suggestion "$BUFFER" && suggestion="$_AUTOSUGGEST_SEARCH_RESULT"
 
     if [[ -n "$suggestion" ]]; then
       # Skip if this command failed in the current session
@@ -779,7 +867,7 @@ _autosuggest_modify() {
         POSTDISPLAY="$_AUTOSUGGEST_SUGGESTION"
 
         # Highlight it in grey
-        region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold memo=autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold autosuggest")
       # For substring matches, show the full command
       elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == *"$BUFFER"* ]]; then
         # Show full command as suggestion
@@ -789,7 +877,7 @@ _autosuggest_modify() {
         POSTDISPLAY=" → $_AUTOSUGGEST_SUGGESTION"
 
         # Highlight it in grey (different style to indicate substring match)
-        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold memo=autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#POSTDISPLAY} )) fg=240,bold autosuggest")
       fi
     fi
 
@@ -813,7 +901,7 @@ _autosuggest_modify() {
       if [[ -n "$freq_cmd" ]]; then
         _AUTOSUGGEST_SUGGESTION="$freq_cmd"
         POSTDISPLAY="$freq_cmd"
-        region_highlight+=("$CURSOR $(( CURSOR + ${#freq_cmd} )) fg=240,bold memo=autosuggest")
+        region_highlight+=("$CURSOR $(( CURSOR + ${#freq_cmd} )) fg=240,bold autosuggest")
       fi
     fi
   fi
@@ -822,6 +910,8 @@ _autosuggest_modify() {
 
 # Show dropdown menu with history matches while typing
 _autosuggest_show_dropdown() {
+  unsetopt xtrace 2>/dev/null
+
   # Don't interfere if already in explicit menu mode (CTRL+R was pressed)
   if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
     return
@@ -857,14 +947,7 @@ _autosuggest_show_dropdown() {
     # Only get contextual matches for auto-dropdown (no global fallback)
     _MENU_MATCHES_CONTEXTUAL=()
     _MENU_MATCHES_GLOBAL=()
-    local matches_output
-    matches_output=$(_menu_get_contextual_substring_matches "$BUFFER")
-    if [[ -n "$matches_output" ]]; then
-      local line
-      while IFS= read -r line; do
-        _MENU_MATCHES_CONTEXTUAL+=("$line")
-      done <<< "$matches_output"
-    fi
+    _menu_collect_contextual_substring_matches "$BUFFER"
 
     # Remove first match from dropdown (already shown as grey auto-suggestion)
     if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
@@ -949,7 +1032,7 @@ _autosuggest_show_frequent_widget() {
   if [[ -n "$freq_cmd" ]]; then
     _AUTOSUGGEST_SUGGESTION="$freq_cmd"
     POSTDISPLAY="$freq_cmd"
-    region_highlight=("0 ${#freq_cmd} fg=240,bold memo=autosuggest")
+    region_highlight=("0 ${#freq_cmd} fg=240,bold autosuggest")
   fi
 }
 
@@ -1605,6 +1688,7 @@ precmd() {
 
         # Also add to in-memory history
         print -s "$_LAST_COMMAND"
+        _GLOBAL_HISTORY_SEARCH_CACHE=("$_LAST_COMMAND" "${_GLOBAL_HISTORY_SEARCH_CACHE[@]}")
       fi
 
       _store_contextual_history "$_LAST_COMMAND" "$_LAST_COMMAND_PWD"
