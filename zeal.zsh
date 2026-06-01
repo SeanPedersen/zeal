@@ -1574,6 +1574,20 @@ bindkey '^[OB' menu-search-down               # Down arrow (application mode)
 bindkey '^[[C' autosuggest-accept-or-forward-char  # Right arrow: accept suggestion or move cursor
 bindkey '^[OC' autosuggest-accept-or-forward-char  # Right arrow (application mode)
 
+# Word navigation — these must be explicit because the bare '^[' (ESC) binding above
+# would otherwise consume the escape prefix before ZSH can match the full sequence.
+bindkey '^[[1;5D' backward-word   # CTRL+LEFT  (xterm / most modern terminals)
+bindkey '^[[1;5C' forward-word    # CTRL+RIGHT
+bindkey '^[[5D'   backward-word   # CTRL+LEFT  (older xterm)
+bindkey '^[[5C'   forward-word    # CTRL+RIGHT
+bindkey '^[Od'    backward-word   # CTRL+LEFT  (application cursor mode)
+bindkey '^[Oc'    forward-word    # CTRL+RIGHT
+bindkey '^[^?'    backward-kill-word  # CTRL+BACKSPACE via ESC+DEL (some terminals)
+bindkey '^[^H'    backward-kill-word  # CTRL+BACKSPACE via ESC+BS  (some terminals)
+
+# CTRL+BACKSPACE — most terminals send ^H (0x08), not ESC-prefixed
+bindkey '^H' backward-kill-word
+
 # Disable terminal interrupt character by default so ZLE can handle CTRL+C
 # This will be re-enabled in preexec() before commands run, and disabled again in precmd()
 stty intr undef
