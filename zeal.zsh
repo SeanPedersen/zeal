@@ -393,7 +393,7 @@ _ensure_global_history_search_cache() {
     fi
 
     [[ -n "$cmd" ]] && _GLOBAL_HISTORY_SEARCH_CACHE+=("$cmd")
-  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+  done < <(tail -2000 "$history_file" 2>/dev/null | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--)print lines[i]}')
 }
 
 _search_global_history() {
@@ -680,7 +680,7 @@ _menu_get_global_substring_matches() {
       count=$((count + 1))
       [[ $count -ge $ZEAL_MENU_MAX_RESULTS ]] && break
     fi
-  done < <(tail -2000 "$history_file" 2>/dev/null | tac)
+  done < <(tail -2000 "$history_file" 2>/dev/null | awk '{lines[NR]=$0} END{for(i=NR;i>=1;i--)print lines[i]}')
 
   # Output matches (one per line)
   if (( ${#matches[@]} > 0 )); then
