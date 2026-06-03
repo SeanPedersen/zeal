@@ -14,10 +14,35 @@ https://github.com/user-attachments/assets/a89d975d-e0e7-4bf8-b050-e73b2621d48f
 
 
 ## Install ZEAL
+
+### Quick Install (macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SeanPedersen/zeal/refs/heads/main/mac-install.sh | bash
+```
+
+Or clone and run locally:
+```bash
+git clone https://github.com/SeanPedersen/zeal.git
+cd zeal
+bash mac-install.sh
+```
+
+The installer will:
+- Install zsh, git, and Nerd Font if missing (via Homebrew)
+- Set zsh as your default shell
+- Install zeal.zsh to `~/.zeal/`
+- Add `source ~/.zeal/zeal.zsh` to your `.zshrc`
+
+### Manual Install
+
 - Install ZSH
   - Debian: ```sudo apt install zsh``` Arch: ```pacman -S zsh```
   - MacOS: ```brew install zsh```
   - Make default shell: ```chsh -s $(which zsh)```
+- Install Nerd Font (for powerline symbols)
+  - MacOS: ```brew install --cask font-meslo-lg-nerd-font```
+  - Then set it as your terminal font
 - Install ZEAL
   - Download [zeal.zsh](https://raw.githubusercontent.com/SeanPedersen/zeal/refs/heads/main/zeal.zsh) or clone this repo
   - Source it from .zshrc (recommended): ```source zeal.zsh```
