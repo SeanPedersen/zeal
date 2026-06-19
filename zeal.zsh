@@ -447,6 +447,7 @@ _autosuggest_find_suggestion() {
     for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
       [[ -z "$entry" ]] && continue
       [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+      [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
       if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
         _AUTOSUGGEST_SEARCH_RESULT="$cmd"
         return 0
@@ -456,6 +457,7 @@ _autosuggest_find_suggestion() {
     for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
       [[ -z "$entry" ]] && continue
       [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+      [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
       if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
         _AUTOSUGGEST_SEARCH_RESULT="$cmd"
         return 0
@@ -468,6 +470,7 @@ _autosuggest_find_suggestion() {
   local -a matches
   matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#${buffer}*}")
   for cmd in "${matches[@]}"; do
+    [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
     if [[ "$cmd" != "$buffer" ]]; then
       _AUTOSUGGEST_SEARCH_RESULT="$cmd"
       return 0
@@ -476,6 +479,7 @@ _autosuggest_find_suggestion() {
 
   matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#*${buffer}*}")
   for cmd in "${matches[@]}"; do
+    [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
     if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
       _AUTOSUGGEST_SEARCH_RESULT="$cmd"
       return 0
@@ -600,6 +604,10 @@ _menu_collect_contextual_substring_matches() {
     [[ -z "$entry" ]] && continue
     [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
     [[ -n "${seen[$cmd]}" ]] && continue
+
+    if [[ -n "${_FAILED_COMMANDS[$cmd]}" ]]; then
+      continue
+    fi
 
     if [[ -z "$query" || "$cmd" == *"$query"* ]]; then
       _MENU_MATCHES_CONTEXTUAL+=("$cmd")
@@ -849,17 +857,15 @@ _autosuggest_modify() {
   # Only suggest if buffer is not empty and cursor is at end of buffer
   if [[ -n "$BUFFER" && $CURSOR -eq ${#BUFFER} ]]; then
     local suggestion=""
+    local displayed_suggestion=""
 
     _autosuggest_find_suggestion "$BUFFER" && suggestion="$_AUTOSUGGEST_SEARCH_RESULT"
 
     if [[ -n "$suggestion" ]]; then
-      # Skip if this command failed in the current session
       if [[ -n "${_FAILED_COMMANDS[$suggestion]}" ]]; then
-        return
-      fi
-
-      # For prefix matches, extract the completion part
-      if [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
+        suggestion=""
+      elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
+        displayed_suggestion="$suggestion"
         # Extract the completion part
         _AUTOSUGGEST_SUGGESTION="${suggestion#$BUFFER}"
 
@@ -870,6 +876,7 @@ _autosuggest_modify() {
         region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold autosuggest")
       # For substring matches, show the full command
       elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == *"$BUFFER"* ]]; then
+        displayed_suggestion="$suggestion"
         # Show full command as suggestion
         _AUTOSUGGEST_SUGGESTION="$suggestion"
 
@@ -882,7 +889,7 @@ _autosuggest_modify() {
     fi
 
     # Show dropdown menu with matches (always visible while typing)
-    _autosuggest_show_dropdown
+    _autosuggest_show_dropdown "$displayed_suggestion"
   elif [[ -z "$BUFFER" ]]; then
     # Buffer is empty - show most frequent contextual command as suggestion
     if [[ "$_MENU_EXPLICIT_MODE" != "true" ]]; then
@@ -911,6 +918,7 @@ _autosuggest_modify() {
 # Show dropdown menu with history matches while typing
 _autosuggest_show_dropdown() {
   unsetopt xtrace 2>/dev/null
+  local displayed_suggestion="$1"
 
   # Don't interfere if already in explicit menu mode (CTRL+R was pressed)
   if [[ "$_MENU_EXPLICIT_MODE" == "true" ]]; then
@@ -949,8 +957,9 @@ _autosuggest_show_dropdown() {
     _MENU_MATCHES_GLOBAL=()
     _menu_collect_contextual_substring_matches "$BUFFER"
 
-    # Remove first match from dropdown (already shown as grey auto-suggestion)
-    if (( ${#_MENU_MATCHES_CONTEXTUAL[@]} > 0 )); then
+    # Remove the grey auto-suggestion from the dropdown when it is also the
+    # first contextual match.
+    if [[ -n "$displayed_suggestion" && "${_MENU_MATCHES_CONTEXTUAL[1]}" == "$displayed_suggestion" ]]; then
       _MENU_MATCHES_CONTEXTUAL=("${_MENU_MATCHES_CONTEXTUAL[@]:1}")
     fi
   fi
