@@ -1597,8 +1597,29 @@ bindkey '^[^H'    backward-kill-word  # CTRL+BACKSPACE via ESC+BS  (some termina
 # CTRL+BACKSPACE — most terminals send ^H (0x08), not ESC-prefixed
 bindkey '^H' backward-kill-word
 
+# Swallow CSI escape sequences we don't have an explicit binding for (e.g. the
+# Kitty keyboard protocol's CSI-u key reports like "\e[99;5u"/"\e[99;5:3u").
+# TUI apps (codex, claude, ...) can enable that protocol and get killed by a
+# CTRL+C flood before disabling it again, so the terminal keeps encoding keys
+# that way until it's reset (see precmd below) — without this, each byte of
+# those sequences gets self-inserted as literal text into the command line.
+# Any *specific* sequence bound above (arrows, CTRL+LEFT/RIGHT, ...) still
+# wins over this catch-all since ZLE prefers the longest matching binding.
+_discard_unknown_csi() {
+  local char
+  # Consume parameter/intermediate bytes until the CSI final byte (0x40-0x7E).
+  while read -t 0.05 -k 1 char 2>/dev/null; do
+    case "$char" in
+      [@-~]) break ;;
+    esac
+  done
+}
+zle -N _discard_unknown_csi
+bindkey '^[[' _discard_unknown_csi
+
 # Disable terminal interrupt character by default so ZLE can handle CTRL+C
 # This will be re-enabled in preexec() before commands run, and disabled again in precmd()
+typeset -g _TTY_INTR_UNDEF=true
 stty intr undef
 
 # Menu search control keys
@@ -1641,6 +1662,7 @@ preexec() {
 
   # Re-enable CTRL+C for interrupting commands
   stty intr '^C'
+  _TTY_INTR_UNDEF=false
 }
 
 precmd() {
@@ -1760,8 +1782,20 @@ precmd() {
   # Set iTerm title back to zsh
   set_iterm_title "zsh"
 
-  # Disable CTRL+C interrupt character so ZLE can handle it
-  stty intr undef
+  # Disable CTRL+C interrupt character so ZLE can handle it. Guarded because
+  # an empty prompt cycle (e.g. spamming ENTER on a blank line) skips preexec
+  # entirely, so intr is already undef and re-forking `stty` would be wasted.
+  if [[ "$_TTY_INTR_UNDEF" != true ]]; then
+    stty intr undef
+    _TTY_INTR_UNDEF=true
+  fi
+
+  # TUI apps (codex, claude, ...) can enable the Kitty keyboard protocol (CSI-u
+  # key encoding) and get killed by a CTRL+C flood before disabling it again,
+  # leaving the terminal to keep encoding keys that way. Unconditionally clear
+  # the enhancement flags so subsequent keys go back to normal encoding; any
+  # CSI-u bytes already in flight are swallowed by _discard_unknown_csi below.
+  print -n '\e[=0u'
 
 }
 
@@ -1976,12 +2010,21 @@ typeset -g _VCS_INFO_CURRENT_HEAD=""
 typeset -g _VCS_INFO_CURRENT_STATUS=""
 typeset -g _VCS_INFO_CURRENT_UPSTREAM=""
 typeset -g _VCS_INFO_REGENERATED_THIS_CYCLE=false
+typeset -g _VCS_INFO_LAST_CHECK_PWD=""
 
 # Check git HEAD once per prompt cycle
 precmd_check_git_head() {
 
   # Guard: only run once per prompt cycle
   if [[ "$_VCS_INFO_CURRENT_HEAD_CHECKED" == "true" ]]; then
+    return
+  fi
+
+  # Fast path: an empty prompt cycle (e.g. spamming ENTER on a blank line)
+  # can't have changed git state if we're still in the same directory, so
+  # reuse the last-checked values instead of forking `git` 4-5 times.
+  if [[ -z "$_LAST_COMMAND" && "$PWD" == "$_VCS_INFO_LAST_CHECK_PWD" ]]; then
+    _VCS_INFO_CURRENT_HEAD_CHECKED=true
     return
   fi
 
@@ -2000,6 +2043,7 @@ precmd_check_git_head() {
       _VCS_INFO_CURRENT_UPSTREAM=$(git rev-parse "origin/$current_branch" 2>/dev/null)
     fi
   fi
+  _VCS_INFO_LAST_CHECK_PWD="$PWD"
   _VCS_INFO_CURRENT_HEAD_CHECKED=true
 }
 
