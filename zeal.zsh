@@ -2011,6 +2011,13 @@ typeset -g _VCS_INFO_CURRENT_STATUS=""
 typeset -g _VCS_INFO_CURRENT_UPSTREAM=""
 typeset -g _VCS_INFO_REGENERATED_THIS_CYCLE=false
 typeset -g _VCS_INFO_LAST_CHECK_PWD=""
+typeset -g _VCS_INFO_LAST_CHECK_TIME=0
+
+# Only consecutive prompt cycles closer together than this reuse the previous
+# git state (see precmd_check_git_head). Short enough that any human-paced
+# ENTER re-checks, long enough to absorb key auto-repeat.
+typeset -g _VCS_INFO_CHECK_DEBOUNCE_SECONDS=0.3
+zmodload zsh/datetime  # $EPOCHREALTIME
 
 # Check git HEAD once per prompt cycle
 precmd_check_git_head() {
@@ -2020,10 +2027,13 @@ precmd_check_git_head() {
     return
   fi
 
-  # Fast path: an empty prompt cycle (e.g. spamming ENTER on a blank line)
-  # can't have changed git state if we're still in the same directory, so
-  # reuse the last-checked values instead of forking `git` 4-5 times.
-  if [[ -z "$_LAST_COMMAND" && "$PWD" == "$_VCS_INFO_LAST_CHECK_PWD" ]]; then
+  # Fast path: back-to-back empty prompt cycles in the same directory (e.g.
+  # holding ENTER on a blank line) reuse the last-checked values instead of
+  # forking `git` 4-5 times. Time-bounded because git state can also change
+  # without this shell running a command — another terminal, an editor saving
+  # a file — so anything slower than key auto-repeat re-checks.
+  if [[ -z "$_LAST_COMMAND" && "$PWD" == "$_VCS_INFO_LAST_CHECK_PWD" ]] &&
+     (( EPOCHREALTIME - _VCS_INFO_LAST_CHECK_TIME < _VCS_INFO_CHECK_DEBOUNCE_SECONDS )); then
     _VCS_INFO_CURRENT_HEAD_CHECKED=true
     return
   fi
@@ -2031,19 +2041,23 @@ precmd_check_git_head() {
   _VCS_INFO_CURRENT_HEAD=""
   _VCS_INFO_CURRENT_UPSTREAM=""
 
-  # Only check once - cache for this prompt cycle
-  if git rev-parse --git-dir > /dev/null 2>&1; then
+  # These values exist only to invalidate the vcs_info cache below, and
+  # spawning `git` costs far more (~13ms) than any of the work it does here,
+  # so collect them in as few invocations as possible. `--porcelain -b` yields
+  # three of them at once: whether we're in a repo (no output if not), the
+  # worktree/index state, and the branch's tracking state
+  # ("## main...origin/main [ahead 1]"), which moves whenever the upstream the
+  # ahead/behind display follows moves. HEAD still needs its own lookup: it
+  # changes without the others during a rebase or on a detached HEAD.
+  local -a status_lines
+  status_lines=( ${(f)"$(git status --porcelain -b 2>/dev/null)"} )
+  if (( ${#status_lines} > 0 )); then
+    _VCS_INFO_CURRENT_UPSTREAM="${status_lines[1]}"
+    _VCS_INFO_CURRENT_STATUS="${status_lines[2]}"
     _VCS_INFO_CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null)
-    # Also check if there are uncommitted changes for cache invalidation
-    # This is fast: just checks if index/worktree differ from HEAD
-    _VCS_INFO_CURRENT_STATUS=$(git status --porcelain 2>/dev/null | head -1)
-    # Check upstream HEAD to detect remote changes (push/pull/fetch)
-    local current_branch=$(git branch --show-current 2>/dev/null)
-    if [[ -n "$current_branch" ]]; then
-      _VCS_INFO_CURRENT_UPSTREAM=$(git rev-parse "origin/$current_branch" 2>/dev/null)
-    fi
   fi
   _VCS_INFO_LAST_CHECK_PWD="$PWD"
+  _VCS_INFO_LAST_CHECK_TIME=$EPOCHREALTIME
   _VCS_INFO_CURRENT_HEAD_CHECKED=true
 }
 
