@@ -1955,6 +1955,9 @@ typeset -g _VCS_INFO_LOADED=false
 # PROMPT_SUBST needed for dynamic prompt evaluation
 setopt PROMPT_SUBST
 
+typeset -g _VCS_STAGED_MARKER='✚'
+typeset -g _VCS_UNSTAGED_MARKER='●'
+
 _init_vcs_info() {
   [[ "$_VCS_INFO_LOADED" == "true" ]] && return
 
@@ -1963,39 +1966,39 @@ _init_vcs_info() {
 
   # Configure vcs_info for git
   zstyle ':vcs_info:*' enable git
-  zstyle ':vcs_info:*' check-for-changes true
-  zstyle ':vcs_info:*' unstagedstr '●'
-  zstyle ':vcs_info:*' stagedstr '✚'
+  # Left off: vcs_info's own dirty check spawns four more `git` processes per
+  # prompt, and precmd_check_git_head already knows the answer. The hook below
+  # supplies %u/%c instead (so unstagedstr/stagedstr go unused as well).
+  zstyle ':vcs_info:*' check-for-changes false
   zstyle ':vcs_info:git:*' formats ' ⎇ %b%F{yellow}%u%c%f%m'
   zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%F{yellow}%u%c%f%m'
 
-  zstyle ':vcs_info:git*+set-message:*' hooks git-aheadbehind
+  zstyle ':vcs_info:git*+set-message:*' hooks git-status-summary
 
   _VCS_INFO_LOADED=true
 }
 
-# Git ahead/behind info (optimized with single git command)
-+vi-git-aheadbehind() {
-  local ahead behind
-  local -a gitstatus
+# Fill in %u/%c and %m from the porcelain output precmd_check_git_head already
+# collected, instead of letting vcs_info re-derive them: the dirty markers cost
+# it four `git` spawns and the ahead/behind counts one more, at ~10ms of
+# process startup each, for data we are holding.
++vi-git-status-summary() {
+  hook_com[staged]="$_VCS_INFO_CURRENT_STAGED"
+  hook_com[unstaged]="$_VCS_INFO_CURRENT_UNSTAGED"
 
-  # Use faster single command to get both ahead and behind counts
-  local ab_output=$(git rev-list --left-right --count ${hook_com[branch]}@{upstream}...HEAD 2>/dev/null)
+  # Branch header, e.g. "## main...origin/main [ahead 1, behind 2]". Brackets
+  # cannot occur in a ref name, so the bracketed part is always the tracking
+  # field ("gone" when the upstream is missing, hence the digit extraction).
+  local header="$_VCS_INFO_CURRENT_UPSTREAM"
+  [[ "$header" == *\[*\] ]] || return
 
-  if [[ -n "$ab_output" ]]; then
-    behind=${ab_output%%[[:space:]]*}
-    ahead=${ab_output##*[[:space:]]}
+  local tracking="${${header##*\[}%\]}"
+  local -a divergence
+  [[ "$tracking" == *ahead* ]]  && divergence+=("↑${${tracking#*ahead }%%[^0-9]*}")
+  [[ "$tracking" == *behind* ]] && divergence+=("↓${${tracking#*behind }%%[^0-9]*}")
 
-    if [[ "$ahead" -gt 0 ]]; then
-      gitstatus+=("↑${ahead}")
-    fi
-    if [[ "$behind" -gt 0 ]]; then
-      gitstatus+=("↓${behind}")
-    fi
-
-    if [[ ${#gitstatus[@]} -gt 0 ]]; then
-      hook_com[misc]=" %F{black}${(j: :)gitstatus}%f"
-    fi
+  if (( ${#divergence} > 0 )); then
+    hook_com[misc]=" %F{black}${(j: :)divergence}%f"
   fi
 }
 
@@ -2008,6 +2011,8 @@ typeset -g _VCS_INFO_CACHE_UPSTREAM=""
 typeset -g _VCS_INFO_CURRENT_HEAD_CHECKED=false
 typeset -g _VCS_INFO_CURRENT_HEAD=""
 typeset -g _VCS_INFO_CURRENT_STATUS=""
+typeset -g _VCS_INFO_CURRENT_STAGED=""
+typeset -g _VCS_INFO_CURRENT_UNSTAGED=""
 typeset -g _VCS_INFO_CURRENT_UPSTREAM=""
 typeset -g _VCS_INFO_REGENERATED_THIS_CYCLE=false
 typeset -g _VCS_INFO_LAST_CHECK_PWD=""
@@ -2029,7 +2034,7 @@ precmd_check_git_head() {
 
   # Fast path: back-to-back empty prompt cycles in the same directory (e.g.
   # holding ENTER on a blank line) reuse the last-checked values instead of
-  # forking `git` 4-5 times. Time-bounded because git state can also change
+  # spawning `git` again. Time-bounded because git state can also change
   # without this shell running a command — another terminal, an editor saving
   # a file — so anything slower than key auto-repeat re-checks.
   if [[ -z "$_LAST_COMMAND" && "$PWD" == "$_VCS_INFO_LAST_CHECK_PWD" ]] &&
@@ -2040,21 +2045,35 @@ precmd_check_git_head() {
 
   _VCS_INFO_CURRENT_HEAD=""
   _VCS_INFO_CURRENT_UPSTREAM=""
+  _VCS_INFO_CURRENT_STATUS=""
+  _VCS_INFO_CURRENT_STAGED=""
+  _VCS_INFO_CURRENT_UNSTAGED=""
 
-  # These values exist only to invalidate the vcs_info cache below, and
-  # spawning `git` costs far more (~13ms) than any of the work it does here,
-  # so collect them in as few invocations as possible. `--porcelain -b` yields
-  # three of them at once: whether we're in a repo (no output if not), the
-  # worktree/index state, and the branch's tracking state
-  # ("## main...origin/main [ahead 1]"), which moves whenever the upstream the
-  # ahead/behind display follows moves. HEAD still needs its own lookup: it
+  # One `git status` feeds both the cache key below and the rendering hook,
+  # because spawning `git` costs ~10ms of process startup before it looks at
+  # the repo at all — far more than any of the work asked of it here.
+  # `--porcelain -b` reports in a single call whether we are in a repo (no
+  # output if not), the state of every changed path, and the branch's tracking
+  # state ("## main...origin/main [ahead 1]"), which moves whenever the
+  # upstream the ahead/behind display follows moves. `--ignore-submodules`
+  # matches how vcs_info judges dirtiness. HEAD still needs its own lookup: it
   # changes without the others during a rebase or on a detached HEAD.
   local -a status_lines
-  status_lines=( ${(f)"$(git status --porcelain -b 2>/dev/null)"} )
+  status_lines=( ${(f)"$(git status --porcelain -b --ignore-submodules=dirty 2>/dev/null)"} )
   if (( ${#status_lines} > 0 )); then
     _VCS_INFO_CURRENT_UPSTREAM="${status_lines[1]}"
-    _VCS_INFO_CURRENT_STATUS="${status_lines[2]}"
     _VCS_INFO_CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null)
+
+    # Porcelain marks each path as "XY path": X is its state in the index, Y
+    # in the worktree. Untracked and ignored paths carry neither marker.
+    local line
+    for line in "${(@)status_lines[2,-1]}"; do
+      [[ "$line" == '??'* || "$line" == '!!'* ]] && continue
+      [[ "${line[1]}" != ' ' ]] && _VCS_INFO_CURRENT_STAGED="$_VCS_STAGED_MARKER"
+      [[ "${line[2]}" != ' ' ]] && _VCS_INFO_CURRENT_UNSTAGED="$_VCS_UNSTAGED_MARKER"
+      [[ -n "$_VCS_INFO_CURRENT_STAGED" && -n "$_VCS_INFO_CURRENT_UNSTAGED" ]] && break
+    done
+    _VCS_INFO_CURRENT_STATUS="${_VCS_INFO_CURRENT_STAGED}${_VCS_INFO_CURRENT_UNSTAGED}"
   fi
   _VCS_INFO_LAST_CHECK_PWD="$PWD"
   _VCS_INFO_LAST_CHECK_TIME=$EPOCHREALTIME
