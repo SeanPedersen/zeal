@@ -1961,6 +1961,11 @@ typeset -g _VCS_UNSTAGED_MARKER='%F{yellow}●%f'
 # invisible in plain yellow against a dark background.
 typeset -g _VCS_UNTRACKED_MARKER='%B%F{red}?%f%b'
 
+# The marker glyphs are visually dense, so a full space on either side of the
+# cluster reads as a gap. A thin space keeps them separated from the branch
+# name and the segment edge without the hole.
+typeset -g _VCS_MARKER_PAD=$'\u2009'
+
 _init_vcs_info() {
   [[ "$_VCS_INFO_LOADED" == "true" ]] && return
 
@@ -1988,12 +1993,18 @@ _init_vcs_info() {
 # it four `git` spawns and the ahead/behind counts one more, at ~10ms of
 # process startup each, for data we are holding.
 +vi-git-status-summary() {
-  # Single field (not %u + %c) so the separator space can be conditional: a
-  # literal space in the format string would show up after a clean branch
-  # name too, lengthening every prompt instead of just dirty ones.
+  # Single field (not %u + %c) so the separator can be conditional: a literal
+  # space in the format string would show up after a clean branch name too,
+  # lengthening every prompt instead of just dirty ones.
   local markers="${_VCS_INFO_CURRENT_UNSTAGED}${_VCS_INFO_CURRENT_UNTRACKED}${_VCS_INFO_CURRENT_STAGED}"
   hook_com[staged]=""
-  hook_com[unstaged]="${markers:+ $markers}"
+  hook_com[unstaged]="${markers:+$_VCS_MARKER_PAD$markers}"
+
+  # %m carries the segment's trailing pad (prompt_git no longer appends one) so
+  # both sides of the marker cluster shrink together; a clean branch keeps the
+  # full space it always had.
+  local pad="${${markers:+$_VCS_MARKER_PAD}:- }"
+  hook_com[misc]="$pad"
 
   # Branch header, e.g. "## main...origin/main [ahead 1, behind 2]". Brackets
   # cannot occur in a ref name, so the bracketed part is always the tracking
@@ -2007,7 +2018,7 @@ _init_vcs_info() {
   [[ "$tracking" == *behind* ]] && divergence+=("↓${${tracking#*behind }%%[^0-9]*}")
 
   if (( ${#divergence} > 0 )); then
-    hook_com[misc]=" %F{black}${(j: :)divergence}%f"
+    hook_com[misc]="${pad}%F{black}${(j: :)divergence}%f "
   fi
 }
 
@@ -2281,7 +2292,7 @@ prompt_git() {
   local result
   if [[ -n ${vcs_info_msg_0_} ]]; then
     # Blue triangle on green background for transition, then git info, then green triangle
-    result="%K{green}%F{blue}${POWERLINE_SEPARATOR}%f%F{black}${vcs_info_msg_0_} %k%f%F{green}${POWERLINE_SEPARATOR}%f"
+    result="%K{green}%F{blue}${POWERLINE_SEPARATOR}%f%F{black}${vcs_info_msg_0_}%k%f%F{green}${POWERLINE_SEPARATOR}%f"
   else
     # No git branch - just blue triangle
     result="%F{blue}${POWERLINE_SEPARATOR}%f"
