@@ -1955,8 +1955,11 @@ typeset -g _VCS_INFO_LOADED=false
 # PROMPT_SUBST needed for dynamic prompt evaluation
 setopt PROMPT_SUBST
 
-typeset -g _VCS_STAGED_MARKER='✚'
-typeset -g _VCS_UNSTAGED_MARKER='●'
+typeset -g _VCS_STAGED_MARKER='%F{yellow}✚%f'
+typeset -g _VCS_UNSTAGED_MARKER='%F{yellow}●%f'
+# Red + bold for contrast: a bare "?" is a thin glyph and read as nearly
+# invisible in plain yellow against a dark background.
+typeset -g _VCS_UNTRACKED_MARKER='%B%F{red}?%f%b'
 
 _init_vcs_info() {
   [[ "$_VCS_INFO_LOADED" == "true" ]] && return
@@ -1970,8 +1973,10 @@ _init_vcs_info() {
   # prompt, and precmd_check_git_head already knows the answer. The hook below
   # supplies %u/%c instead (so unstagedstr/stagedstr go unused as well).
   zstyle ':vcs_info:*' check-for-changes false
-  zstyle ':vcs_info:git:*' formats ' ⎇ %b%F{yellow}%u%c%f%m'
-  zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%F{yellow}%u%c%f%m'
+  # Markers carry their own %F{}...%f color (see _VCS_*_MARKER below) since
+  # untracked needs a color distinct from staged/unstaged for contrast.
+  zstyle ':vcs_info:git:*' formats ' ⎇ %b%u%f%m'
+  zstyle ':vcs_info:git:*' actionformats ' ⎇ %b|%a%u%f%m'
 
   zstyle ':vcs_info:git*+set-message:*' hooks git-status-summary
 
@@ -1983,8 +1988,12 @@ _init_vcs_info() {
 # it four `git` spawns and the ahead/behind counts one more, at ~10ms of
 # process startup each, for data we are holding.
 +vi-git-status-summary() {
-  hook_com[staged]="$_VCS_INFO_CURRENT_STAGED"
-  hook_com[unstaged]="$_VCS_INFO_CURRENT_UNSTAGED"
+  # Single field (not %u + %c) so the separator space can be conditional: a
+  # literal space in the format string would show up after a clean branch
+  # name too, lengthening every prompt instead of just dirty ones.
+  local markers="${_VCS_INFO_CURRENT_UNSTAGED}${_VCS_INFO_CURRENT_UNTRACKED}${_VCS_INFO_CURRENT_STAGED}"
+  hook_com[staged]=""
+  hook_com[unstaged]="${markers:+ $markers}"
 
   # Branch header, e.g. "## main...origin/main [ahead 1, behind 2]". Brackets
   # cannot occur in a ref name, so the bracketed part is always the tracking
@@ -2013,6 +2022,7 @@ typeset -g _VCS_INFO_CURRENT_HEAD=""
 typeset -g _VCS_INFO_CURRENT_STATUS=""
 typeset -g _VCS_INFO_CURRENT_STAGED=""
 typeset -g _VCS_INFO_CURRENT_UNSTAGED=""
+typeset -g _VCS_INFO_CURRENT_UNTRACKED=""
 typeset -g _VCS_INFO_CURRENT_UPSTREAM=""
 typeset -g _VCS_INFO_REGENERATED_THIS_CYCLE=false
 typeset -g _VCS_INFO_LAST_CHECK_PWD=""
@@ -2048,6 +2058,7 @@ precmd_check_git_head() {
   _VCS_INFO_CURRENT_STATUS=""
   _VCS_INFO_CURRENT_STAGED=""
   _VCS_INFO_CURRENT_UNSTAGED=""
+  _VCS_INFO_CURRENT_UNTRACKED=""
 
   # One `git status` feeds both the cache key below and the rendering hook,
   # because spawning `git` costs ~10ms of process startup before it looks at
@@ -2065,15 +2076,20 @@ precmd_check_git_head() {
     _VCS_INFO_CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null)
 
     # Porcelain marks each path as "XY path": X is its state in the index, Y
-    # in the worktree. Untracked and ignored paths carry neither marker.
+    # in the worktree. "??" is untracked (neither slot reflects index/worktree
+    # state, so it needs its own marker); ignored ("!!") paths carry no marker
+    # at all.
     local line
     for line in "${(@)status_lines[2,-1]}"; do
-      [[ "$line" == '??'* || "$line" == '!!'* ]] && continue
-      [[ "${line[1]}" != ' ' ]] && _VCS_INFO_CURRENT_STAGED="$_VCS_STAGED_MARKER"
-      [[ "${line[2]}" != ' ' ]] && _VCS_INFO_CURRENT_UNSTAGED="$_VCS_UNSTAGED_MARKER"
-      [[ -n "$_VCS_INFO_CURRENT_STAGED" && -n "$_VCS_INFO_CURRENT_UNSTAGED" ]] && break
+      if [[ "$line" == '??'* ]]; then
+        _VCS_INFO_CURRENT_UNTRACKED="$_VCS_UNTRACKED_MARKER"
+      elif [[ "$line" != '!!'* ]]; then
+        [[ "${line[1]}" != ' ' ]] && _VCS_INFO_CURRENT_STAGED="$_VCS_STAGED_MARKER"
+        [[ "${line[2]}" != ' ' ]] && _VCS_INFO_CURRENT_UNSTAGED="$_VCS_UNSTAGED_MARKER"
+      fi
+      [[ -n "$_VCS_INFO_CURRENT_STAGED" && -n "$_VCS_INFO_CURRENT_UNSTAGED" && -n "$_VCS_INFO_CURRENT_UNTRACKED" ]] && break
     done
-    _VCS_INFO_CURRENT_STATUS="${_VCS_INFO_CURRENT_STAGED}${_VCS_INFO_CURRENT_UNSTAGED}"
+    _VCS_INFO_CURRENT_STATUS="${_VCS_INFO_CURRENT_STAGED}${_VCS_INFO_CURRENT_UNSTAGED}${_VCS_INFO_CURRENT_UNTRACKED}"
   fi
   _VCS_INFO_LAST_CHECK_PWD="$PWD"
   _VCS_INFO_LAST_CHECK_TIME=$EPOCHREALTIME
