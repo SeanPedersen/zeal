@@ -216,9 +216,6 @@ typeset -g _LAST_COMMAND=""
 typeset -g _LAST_COMMAND_PWD=""
 typeset -g _PENDING_HISTORY_ENTRY=""
 
-# Track failed commands in current session (for filtering auto-suggestions)
-typeset -gA _FAILED_COMMANDS  # command -> 1 (hash set for O(1) lookup)
-
 # Hook to capture commands with directory context
 zshaddhistory() {
   local command="${1%%$'\n'}"
@@ -447,7 +444,6 @@ _autosuggest_find_suggestion() {
     for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
       [[ -z "$entry" ]] && continue
       [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
-      [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
       if [[ "$cmd" == "$buffer"* && "$cmd" != "$buffer" ]]; then
         _AUTOSUGGEST_SEARCH_RESULT="$cmd"
         return 0
@@ -457,7 +453,6 @@ _autosuggest_find_suggestion() {
     for entry in "${_CONTEXTUAL_HISTORY_SEARCH_CACHE[@]}"; do
       [[ -z "$entry" ]] && continue
       [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
-      [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
       if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
         _AUTOSUGGEST_SEARCH_RESULT="$cmd"
         return 0
@@ -470,7 +465,6 @@ _autosuggest_find_suggestion() {
   local -a matches
   matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#${buffer}*}")
   for cmd in "${matches[@]}"; do
-    [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
     if [[ "$cmd" != "$buffer" ]]; then
       _AUTOSUGGEST_SEARCH_RESULT="$cmd"
       return 0
@@ -479,7 +473,6 @@ _autosuggest_find_suggestion() {
 
   matches=("${(@M)_GLOBAL_HISTORY_SEARCH_CACHE:#*${buffer}*}")
   for cmd in "${matches[@]}"; do
-    [[ -n "${_FAILED_COMMANDS[$cmd]}" ]] && continue
     if [[ "$cmd" == *"$buffer"* && "$cmd" != "$buffer"* && "$cmd" != "$buffer" ]]; then
       _AUTOSUGGEST_SEARCH_RESULT="$cmd"
       return 0
@@ -604,10 +597,6 @@ _menu_collect_contextual_substring_matches() {
     [[ -z "$entry" ]] && continue
     [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
     [[ -n "${seen[$cmd]}" ]] && continue
-
-    if [[ -n "${_FAILED_COMMANDS[$cmd]}" ]]; then
-      continue
-    fi
 
     if [[ -z "$query" || "$cmd" == *"$query"* ]]; then
       _MENU_MATCHES_CONTEXTUAL+=("$cmd")
@@ -862,9 +851,7 @@ _autosuggest_modify() {
     _autosuggest_find_suggestion "$BUFFER" && suggestion="$_AUTOSUGGEST_SEARCH_RESULT"
 
     if [[ -n "$suggestion" ]]; then
-      if [[ -n "${_FAILED_COMMANDS[$suggestion]}" ]]; then
-        suggestion=""
-      elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
+      if [[ "$suggestion" != "$BUFFER" && "$suggestion" == "$BUFFER"* ]]; then
         displayed_suggestion="$suggestion"
         # Extract the completion part
         _AUTOSUGGEST_SUGGESTION="${suggestion#$BUFFER}"
@@ -1737,11 +1724,6 @@ precmd() {
       fi
 
       _store_contextual_history "$_LAST_COMMAND" "$_LAST_COMMAND_PWD"
-      # Remove from failed commands if it was previously failed (command now works)
-      unset "_FAILED_COMMANDS[$_LAST_COMMAND]"
-    else
-      # Command failed - track as failed, don't add to global history
-      _FAILED_COMMANDS[$_LAST_COMMAND]=1
     fi
   fi
 
