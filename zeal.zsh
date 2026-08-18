@@ -30,6 +30,11 @@
 : ${ZEAL_COLOR_OPERATOR:=magenta}        # Pipes, redirections, &&, ||, ;
 : ${ZEAL_COLOR_COMMENT:=8}              # Comments (#)
 
+# Typo correction: when the typed command is unknown (shown as invalid), offer
+# the nearest matching command from history as an accept-able grey suggestion.
+: ${ZEAL_TYPO_CORRECTION:=true}          # Enable fuzzy fix for unknown commands
+: ${ZEAL_TYPO_MAX_DISTANCE:=2}           # Max edit distance for a typo match
+
 # ============================================================================
 
 # History settings
@@ -479,6 +484,147 @@ _autosuggest_find_suggestion() {
     fi
   done
 
+  # Last resort: the command word itself is a typo (unknown command). Offer the
+  # closest historical command by edit distance.
+  _autosuggest_find_fuzzy_correction "$buffer" && return 0
+
+  return 1
+}
+
+# ----------------------------------------------------------------------------
+# Typo Correction (nearest fuzzy command match from history)
+# ----------------------------------------------------------------------------
+
+# Optimal string alignment (restricted Damerau-Levenshtein) distance between two
+# short strings. Unlike plain Levenshtein it counts an adjacent transposition
+# (the most common typo, e.g. "gti"->"git") as a single edit. The result is
+# written to _ZEAL_EDIT_DIST instead of echoed to avoid a subshell per candidate.
+typeset -gi _ZEAL_EDIT_DIST=0
+_zeal_edit_distance() {
+  local a="$1" b="$2"
+  local -i la=${#a} lb=${#b}
+  (( la == 0 )) && { _ZEAL_EDIT_DIST=$lb; return; }
+  (( lb == 0 )) && { _ZEAL_EDIT_DIST=$la; return; }
+
+  # Rows are 1-offset: row[k+1] holds the distance for the length-k prefix.
+  local -a prev2 prev cur
+  local -i i j cost del ins sub m
+  for (( j = 0; j <= lb; j++ )); do prev[j+1]=$j; done
+
+  for (( i = 1; i <= la; i++ )); do
+    cur=(); cur[1]=$((i))
+    local ca="${a[i]}"
+    for (( j = 1; j <= lb; j++ )); do
+      [[ "$ca" == "${b[j]}" ]] && cost=0 || cost=1
+      del=$(( prev[j+1] + 1 ))
+      ins=$(( cur[j] + 1 ))
+      sub=$(( prev[j] + cost ))
+      m=$del
+      (( ins < m )) && m=$ins
+      (( sub < m )) && m=$sub
+      # Transposition of adjacent characters counts as one edit
+      if (( i > 1 && j > 1 )) && [[ "$ca" == "${b[j-1]}" && "${a[i-1]}" == "${b[j]}" ]]; then
+        (( prev2[j-1] + 1 < m )) && m=$(( prev2[j-1] + 1 ))
+      fi
+      cur[j+1]=$m
+    done
+    prev2=("${prev[@]}")
+    prev=("${cur[@]}")
+  done
+
+  _ZEAL_EDIT_DIST=${prev[lb+1]}
+}
+
+# Whether a word is a known command, reusing the syntax highlighter's cache so
+# the invalid-command (red) verdict and the typo trigger stay in sync.
+_zeal_is_valid_command() {
+  local w="$1"
+  if [[ -z "${_SYNTAX_CMD_CACHE[$w]+x}" ]]; then
+    whence "$w" &>/dev/null && _SYNTAX_CMD_CACHE[$w]=0 || _SYNTAX_CMD_CACHE[$w]=1
+  fi
+  (( _SYNTAX_CMD_CACHE[$w] == 0 ))
+}
+
+# Scan a history cache array (passed by name) for the command whose first word
+# is the closest edit-distance match to a typo. Writes the winner to
+# _ZEAL_FUZZY_BEST; returns success when a match within max distance is found.
+typeset -g _ZEAL_FUZZY_BEST=""
+_zeal_fuzzy_scan() {
+  local arrname="$1" typo="$2" rest="$3"
+  local -i max_dist=$4 tlen=${#2}
+
+  local -A seen_word
+  local entry cmd cand_word cand_rest best_cmd=""
+  local -i best_dist=99 clen
+
+  for entry in "${(@P)arrname}"; do
+    [[ -z "$entry" ]] && continue
+    [[ "$entry" == *"|||"* ]] && cmd="${entry#*|||}" || cmd="$entry"
+    cand_word="${cmd%% *}"
+    [[ "$cand_word" == "$typo" ]] && continue
+
+    # Cheap length prune before the O(n*m) distance computation
+    clen=${#cand_word}
+    (( clen < tlen - max_dist || clen > tlen + max_dist )) && continue
+
+    if [[ -n "$rest" ]]; then
+      # User already typed arguments; the candidate must continue with them
+      [[ "$cmd" == *" "* ]] || continue
+      cand_rest="${cmd#* }"
+      [[ "$cand_rest" == "$rest"* ]] || continue
+    else
+      # One correction per distinct command word (cache is newest-first, so the
+      # first occurrence is the most recent full command for that word)
+      [[ -n "${seen_word[$cand_word]}" ]] && continue
+      seen_word[$cand_word]=1
+    fi
+
+    _zeal_edit_distance "$typo" "$cand_word"
+    if (( _ZEAL_EDIT_DIST <= max_dist && _ZEAL_EDIT_DIST < best_dist )); then
+      best_dist=$_ZEAL_EDIT_DIST
+      best_cmd="$cmd"
+      (( best_dist == 1 )) && break   # closest possible; take the most recent
+    fi
+  done
+
+  _ZEAL_FUZZY_BEST="$best_cmd"
+  [[ -n "$best_cmd" ]]
+}
+
+# Suggest the nearest historical command when the typed command word is unknown.
+# Prefers directory-local history over global. Sets _AUTOSUGGEST_SEARCH_RESULT.
+_autosuggest_find_fuzzy_correction() {
+  unsetopt xtrace 2>/dev/null
+
+  [[ "$ZEAL_TYPO_CORRECTION" == "true" ]] || return 1
+
+  local buffer="$1"
+  local typo="${buffer%% *}"
+
+  # Need a complete, non-trivial command word that is actually unknown (red)
+  (( ${#typo} >= 3 )) || return 1
+  _zeal_is_valid_command "$typo" && return 1
+
+  # Scale tolerance with word length so short words don't over-match
+  local -i max_dist=$ZEAL_TYPO_MAX_DISTANCE
+  (( ${#typo} <= 4 && max_dist > 1 )) && max_dist=1
+
+  # Preserve anything the user typed after the command word as a required prefix
+  local rest=""
+  [[ "$buffer" == *" "* ]] && rest="${buffer#* }"
+
+  _ensure_contextual_history_search_cache
+  if _zeal_fuzzy_scan _CONTEXTUAL_HISTORY_SEARCH_CACHE "$typo" "$rest" $max_dist; then
+    _AUTOSUGGEST_SEARCH_RESULT="$_ZEAL_FUZZY_BEST"
+    return 0
+  fi
+
+  _ensure_global_history_search_cache
+  if _zeal_fuzzy_scan _GLOBAL_HISTORY_SEARCH_CACHE "$typo" "$rest" $max_dist; then
+    _AUTOSUGGEST_SEARCH_RESULT="$_ZEAL_FUZZY_BEST"
+    return 0
+  fi
+
   return 1
 }
 
@@ -861,8 +1007,10 @@ _autosuggest_modify() {
 
         # Highlight it in grey
         region_highlight+=("$CURSOR $(( CURSOR + ${#_AUTOSUGGEST_SUGGESTION} )) fg=240,bold autosuggest")
-      # For substring matches, show the full command
-      elif [[ "$suggestion" != "$BUFFER" && "$suggestion" == *"$BUFFER"* ]]; then
+      # For substring matches (and fuzzy typo corrections), show the full
+      # command. A typo correction differs from BUFFER at the command word, so
+      # it is neither a prefix nor a substring — this branch catches both.
+      elif [[ "$suggestion" != "$BUFFER" ]]; then
         displayed_suggestion="$suggestion"
         # Show full command as suggestion
         _AUTOSUGGEST_SUGGESTION="$suggestion"
