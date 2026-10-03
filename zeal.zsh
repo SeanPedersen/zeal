@@ -542,7 +542,8 @@ _zeal_is_valid_command() {
   if [[ -z "${_SYNTAX_CMD_CACHE[$w]+x}" ]]; then
     whence "$w" &>/dev/null && _SYNTAX_CMD_CACHE[$w]=0 || _SYNTAX_CMD_CACHE[$w]=1
   fi
-  (( _SYNTAX_CMD_CACHE[$w] == 0 ))
+  # String compare: arithmetic subscripts break on keys containing ] ) \ etc.
+  [[ "${_SYNTAX_CMD_CACHE[$w]}" == 0 ]]
 }
 
 # Scan a history cache array (passed by name) for the command whose first word
@@ -2060,10 +2061,7 @@ _sh_w() {
   local w="${buf:$word_start:$((i - word_start))}"
 
   if (( is_cmd )); then
-    if [[ -z "${_SYNTAX_CMD_CACHE[$w]+x}" ]]; then
-      whence "$w" &>/dev/null && _SYNTAX_CMD_CACHE[$w]=0 || _SYNTAX_CMD_CACHE[$w]=1
-    fi
-    if (( _SYNTAX_CMD_CACHE[$w] == 0 )); then
+    if _zeal_is_valid_command "$w"; then
       _sh_hl+=("$word_start $i fg=${ZEAL_COLOR_CMD_VALID} syntax")
     else
       _sh_hl+=("$word_start $i fg=${ZEAL_COLOR_CMD_INVALID},underline syntax")
